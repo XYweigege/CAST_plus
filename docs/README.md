@@ -3,7 +3,8 @@
 | 文档 | 内容 |
 |------|------|
 | [README.md](../README.md) | 项目介绍、架构设计、核心决策、效果评估 |
-| [BACKEND.md](./BACKEND.md) | **后端实现详解**：架构分层、数据模型、25 个接口、核心流程、AI 层逐段分析 |
+| [BACKEND.md](./BACKEND.md) | 旧 Node 版后端实现详解（存档） |
+| [BACKEND_JAVA.md](./BACKEND_JAVA.md) | **Java 后端开发文档（当前）**：技术栈、分层架构、统一契约、全部接口、异步分析流程、AI 层、去重/预警/推送、配置与已知缺口 |
 | [DEVELOPMENT.md](./DEVELOPMENT.md) | 开发实施文档：改造全过程、每步决策依据、踩坑记录 |
 | [REQUIREMENTS.md](./REQUIREMENTS.md) | 需求文档：背景、功能需求、数据规格、AI 规格、验收标准 |
 | [LOCAL_SETUP.md](./LOCAL_SETUP.md) | 本地运行指南：从安装到体验的完整步骤、常见问题 |
