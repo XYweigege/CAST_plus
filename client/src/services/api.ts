@@ -82,6 +82,50 @@ export interface AnalysisResult {
   confidence: number;
 }
 
+/** Java 端统一响应封装 Result{code, message, data, timestamp} */
+interface ResultWrapper {
+  code: number;
+  message: string;
+  data: unknown;
+}
+
+function isResultWrapper(body: unknown): body is ResultWrapper {
+  return (
+    typeof body === 'object' &&
+    body !== null &&
+    typeof (body as ResultWrapper).code === 'number' &&
+    'data' in body
+  );
+}
+
+/** Java 端分页结构 PageResult{records, current, size, total, pages} */
+interface JavaPage<T> {
+  records: T[];
+  current: number;
+  size: number;
+  total: number;
+  pages: number;
+}
+
+function isJavaPage(body: unknown): body is JavaPage<unknown> {
+  return (
+    typeof body === 'object' &&
+    body !== null &&
+    Array.isArray((body as JavaPage<unknown>).records)
+  );
+}
+
+interface Pagination {
+  page: number;
+  limit: number;
+  total: number;
+  totalPages: number;
+}
+
+function toPagination<T>(p: JavaPage<T>): Pagination {
+  return { page: p.current, limit: p.size, total: p.total, totalPages: p.pages };
+}
+
 async function request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(`${API_BASE}${endpoint}`, {
     headers: {
@@ -91,16 +135,25 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
     ...options
   });
 
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({ error: 'Request failed' }));
-    throw new Error(error.error || 'Request failed');
-  }
-
   if (response.status === 204) {
     return undefined as T;
   }
 
-  return response.json();
+  const body = await response.json().catch(() => null);
+
+  if (!response.ok) {
+    throw new Error(body?.message || body?.error || 'Request failed');
+  }
+
+  // Java 端返回统一 Result 封装（HTTP 状态恒 200，错误也在 code 里），这里解包；
+  // Node 端直返业务数据，原样返回，两端兼容
+  if (isResultWrapper(body)) {
+    if (body.code !== 0) {
+      throw new Error(body.message || 'Request failed');
+    }
+    return body.data as T;
+  }
+  return body as T;
 }
 
 // ============ 主题词 ============
@@ -152,16 +205,21 @@ export interface FeedbackQuery {
 }
 
 export const feedbacksApi = {
-  getAll: (params?: FeedbackQuery) => {
+  getAll: async (params?: FeedbackQuery) => {
     const searchParams = new URLSearchParams();
     if (params) {
       Object.entries(params).forEach(([key, value]) => {
         if (value !== undefined && value !== '') searchParams.append(key, String(value));
       });
     }
-    return request<{ data: Feedback[]; pagination: { page: number; limit: number; total: number; totalPages: number } }>(
+    const res = await request<{ data: Feedback[]; pagination: Pagination } | JavaPage<Feedback>>(
       `/feedbacks?${searchParams}`
     );
+    // Java 端直返 PageResult，映射为前端期望的 { data, pagination } 结构
+    if (isJavaPage(res)) {
+      return { data: res.records as Feedback[], pagination: toPagination(res) };
+    }
+    return res;
   },
 
   getStats: () => request<Stats>('/feedbacks/stats'),
@@ -175,9 +233,9 @@ export const feedbacksApi = {
       body: JSON.stringify(data)
     }),
 
-  /** 导入外部反馈数据 */
+  /** 导入外部反馈数据（Java 端仅返回 created） */
   import: (content: string, format: 'json' | 'csv') =>
-    request<{ total: number; created: number }>('/feedbacks/import', {
+    request<{ total?: number; created: number }>('/feedbacks/import', {
       method: 'POST',
       body: JSON.stringify({ content, format })
     }),
@@ -205,19 +263,24 @@ export const feedbacksApi = {
 
 // ============ 预警 ============
 export const alertsApi = {
-  getAll: (params?: { page?: number; limit?: number; unreadOnly?: boolean; unhandledOnly?: boolean }) => {
+  getAll: async (params?: { page?: number; limit?: number; unreadOnly?: boolean; unhandledOnly?: boolean }) => {
     const searchParams = new URLSearchParams();
     if (params) {
       Object.entries(params).forEach(([key, value]) => {
         if (value !== undefined) searchParams.append(key, String(value));
       });
     }
-    return request<{
+    const res = await request<{
       data: Alert[];
       unreadCount: number;
       unhandledCount: number;
-      pagination: { page: number; limit: number; total: number; totalPages: number };
+      pagination: Pagination | JavaPage<Alert>;
     }>(`/alerts?${searchParams}`);
+    // Java 端 pagination 为 PageResult 结构，字段名映射
+    if (isJavaPage(res.pagination)) {
+      return { ...res, pagination: toPagination(res.pagination) };
+    }
+    return res as { data: Alert[]; unreadCount: number; unhandledCount: number; pagination: Pagination };
   },
 
   markAsRead: (id: string) => request<Alert>(`/alerts/${id}/read`, { method: 'PATCH' }),
@@ -240,6 +303,6 @@ export const settingsApi = {
     })
 };
 
-// 手动触发一轮分析
+// 手动触发一轮分析（异步：投递到 MQ，消费者并发执行，结果经实时推送到达）
 export const triggerInsightCheck = () =>
-  request<{ message: string }>('/check-feedbacks', { method: 'POST' });
+  request<{ message: string; queued?: number }>('/check-feedbacks', { method: 'POST' });

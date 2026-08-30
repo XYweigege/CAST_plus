@@ -12,7 +12,9 @@ import com.voc.insight.mapper.FeedbackMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DuplicateKeyException;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.util.StringUtils;
 
 import java.math.BigDecimal;
 import java.util.Map;
@@ -27,10 +29,14 @@ import java.util.Map;
 @RequiredArgsConstructor
 public class FeedbackProcessService {
 
+    /** 去重 SET key 前缀：按渠道分桶，member 为 sourceId */
+    private static final String DEDUP_KEY = "voc:dedup:";
+
     private final FeedbackMapper feedbackMapper;
     private final AlertMapper alertMapper;
     private final NotifyService notifyService;
     private final MailService mailService;
+    private final StringRedisTemplate redisTemplate;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     /**
@@ -42,11 +48,8 @@ public class FeedbackProcessService {
      * @return 保存后的反馈；重复数据返回 null
      */
     public Feedback saveFeedback(FeedbackInput input, FeedbackAnalysis analysis, String topicId) {
-        // 去重：同一来源的同一条记录只处理一次
-        Long exists = feedbackMapper.selectCount(new LambdaQueryWrapper<Feedback>()
-                .eq(Feedback::getSource, input.getSource())
-                .eq(Feedback::getSourceId, input.getSourceId()));
-        if (exists > 0) {
+        // 去重：同一来源的同一条记录只处理一次（Redis 快速路径，DB 唯一约束兜底）
+        if (isDuplicate(input)) {
             return null;
         }
 
@@ -87,6 +90,27 @@ public class FeedbackProcessService {
         }
 
         return feedback;
+    }
+
+    /**
+     * 判重：优先 Redis SADD（O(1)，不打数据库）；Redis 不可用时回退 DB 查询。
+     * sourceId 为空时不判重（与原 SQL 语义一致，NULL 不参与去重）。
+     */
+    private boolean isDuplicate(FeedbackInput input) {
+        if (!StringUtils.hasText(input.getSourceId())) {
+            return false;
+        }
+        try {
+            Long added = redisTemplate.opsForSet()
+                    .add(DEDUP_KEY + input.getSource(), input.getSourceId());
+            return added != null && added == 0;
+        } catch (Exception e) {
+            log.warn("Redis 去重不可用，回退数据库查询: {}", e.getMessage());
+            Long exists = feedbackMapper.selectCount(new LambdaQueryWrapper<Feedback>()
+                    .eq(Feedback::getSource, input.getSource())
+                    .eq(Feedback::getSourceId, input.getSourceId()));
+            return exists > 0;
+        }
     }
 
     private void createAlert(Feedback feedback, FeedbackAnalysis analysis) {

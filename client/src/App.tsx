@@ -20,6 +20,8 @@ function App() {
 
   const [topics, setTopics] = useState<Topic[]>([]);
   const [feedbacks, setFeedbacks] = useState<Feedback[]>([]);
+  // topicId -> 主题词文本（Java 端反馈只带 topicId，用于表格展示归属主题词）
+  const topicMap = useMemo(() => Object.fromEntries(topics.map(t => [t.id, t.text])), [topics]);
   const [stats, setStats] = useState<Stats | null>(null);
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [unreadCount, setUnreadCount] = useState(0);
@@ -195,8 +197,12 @@ function App() {
   const handleManualCheck = async () => {
     setIsChecking(true);
     try {
-      await triggerInsightCheck();
-      showToast('分析任务已触发', 'success');
+      const res = await triggerInsightCheck();
+      // 异步分析：新数据会通过实时推送逐条到达，定时刷新仅作兜底
+      showToast(
+        res.queued != null ? `已投递 ${res.queued} 个分析任务，结果将陆续到达` : '分析任务已触发',
+        'success'
+      );
       setTimeout(loadData, 4000);
     } catch {
       showToast('触发失败', 'error');
@@ -366,6 +372,7 @@ function App() {
               totalPages={totalPages}
               onPageChange={setCurrentPage}
               onReview={handleReview}
+              topicMap={topicMap}
             />
           </div>
         )}

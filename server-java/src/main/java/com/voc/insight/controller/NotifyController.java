@@ -40,10 +40,10 @@ public class NotifyController {
         ));
     }
 
-    @Operation(summary = "手动触发一轮分析")
+    @Operation(summary = "手动触发一轮分析（异步投递到 MQ，消费者并发执行）")
     @PostMapping("/api/check-feedbacks")
     public Result<Map<String, Object>> check() {
-        int created = insightService.runCheck();
-        return Result.success(Map.of("message", "Insight check completed", "created", created));
+        int queued = insightService.runCheck();
+        return Result.success(Map.of("message", "Insight check queued", "queued", queued));
     }
 }

@@ -12,11 +12,15 @@ import com.voc.insight.entity.Topic;
 import com.voc.insight.mapper.AlertMapper;
 import com.voc.insight.mapper.FeedbackMapper;
 import com.voc.insight.mapper.TopicMapper;
+import com.voc.insight.mq.AnalyzeTaskMessage;
+import com.voc.insight.mq.AnalyzeTaskProducer;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.HashMap;
 import java.util.List;
@@ -25,8 +29,9 @@ import java.util.Map;
 /**
  * 洞察分析核心流程。
  *
- * 流程：拉取激活主题词 → 采集反馈 → 逐主题词（扩展 → 预匹配 → AI 分析 → 归属判断
- * → 保存 → 命中计数 → 推送/预警）→ 突增检测。
+ * 流程：拉取激活主题词 → 采集反馈 → 投递分析任务到 MQ（预热扩展缓存）
+ * → 消费者并发执行（预匹配 → AI 分析 → 归属判断 → 保存 → 命中计数 → 推送/预警）
+ * → 突增检测。
  *
  * 生产接入点：fetchNewFeedback() 只需替换为业务系统接口 / 文件导出轮询。
  */
@@ -35,6 +40,9 @@ import java.util.Map;
 @RequiredArgsConstructor
 public class InsightService {
 
+    /** 突增预警冷却 key 前缀，TTL 即静默期 */
+    private static final String SURGE_COOLDOWN_KEY = "voc:surge:cooldown:";
+
     private final TopicMapper topicMapper;
     private final FeedbackMapper feedbackMapper;
     private final AlertMapper alertMapper;
@@ -42,6 +50,8 @@ public class InsightService {
     private final FeedbackSourceService sourceService;
     private final FeedbackProcessService processService;
     private final NotifyService notifyService;
+    private final AnalyzeTaskProducer analyzeTaskProducer;
+    private final StringRedisTemplate redisTemplate;
 
     @Value("${voc.insight.batch-size:12}")
     private int batchSize;
@@ -55,7 +65,8 @@ public class InsightService {
     private int batchSeq = 0;
 
     /**
-     * 执行一轮分析，返回新增反馈数。
+     * 执行一轮分析：采集 + 投递 MQ，返回投递的分析任务数。
+     * 实际新增反馈数由消费者异步产生。
      */
     public int runCheck() {
         List<Topic> topics = topicMapper.selectList(
@@ -68,46 +79,57 @@ public class InsightService {
         List<FeedbackInput> items = fetchNewFeedback();
         log.info("采集到 {} 条新增反馈，覆盖 {} 个主题词", items.size(), topics.size());
 
-        int newCount = 0;
+        int queued = 0;
         for (Topic topic : topics) {
             try {
-                // 1) 主题词扩展：把书面业务术语翻译成客户口语表达
-                List<String> expanded = aiService.expandTopic(topic.getText());
-
+                // 预热扩展缓存（Redis），消费者直接命中，避免并发重复调 AI
+                aiService.expandTopic(topic.getText());
                 for (FeedbackInput item : items) {
-                    // 2) 预匹配：未命中扩展词的反馈可能无关，但仍送 AI 兜底语义判断
-                    List<String> matched = aiService.preMatch(item.getContent(), expanded);
-
-                    // 3) AI 结构化分析
-                    FeedbackAnalysis analysis = aiService.analyzeFeedback(item, matched);
-
-                    // 4) 归属判断：命中扩展词（字面）或 AI 判定的主题与该主题词相关（语义）
-                    boolean topicMatched = !matched.isEmpty() || isTopicRelated(analysis, topic.getText());
-                    if (!topicMatched) {
-                        continue;
-                    }
-
-                    // 5) 保存 + 推送 + 预警（去重在内部处理）
-                    Feedback saved = processService.saveFeedback(item, analysis, topic.getId());
-                    if (saved != null) {
-                        newCount++;
-                        // 6) 主题命中计数（驱动关键词调优闭环）
-                        topicMapper.update(null, new LambdaUpdateWrapper<Topic>()
-                                .eq(Topic::getId, topic.getId())
-                                .setSql("hit_count = hit_count + 1"));
-                    }
+                    analyzeTaskProducer.send(new AnalyzeTaskMessage(topic.getId(), item));
+                    queued++;
                 }
             } catch (Exception e) {
-                // 单个主题词失败不影响其他
-                log.error("主题 [{}] 分析失败: {}", topic.getText(), e.getMessage());
+                // 单个主题词投递失败不影响其他
+                log.error("主题 [{}] 任务投递失败: {}", topic.getText(), e.getMessage());
             }
         }
 
-        // 7) 突增检测
+        // 突增检测（读已落库数据，留在生产者侧同步执行）
         detectSurge();
 
-        log.info("本轮分析完成，新增 {} 条反馈", newCount);
-        return newCount;
+        log.info("本轮分析完成，投递 {} 个分析任务", queued);
+        return queued;
+    }
+
+    /**
+     * 消费一个分析任务：预匹配 → AI 分析 → 归属判断 → 保存 → 命中计数。
+     * 由 AnalyzeTaskConsumer 调用。
+     */
+    public void processAnalyzeTask(String topicId, FeedbackInput item) {
+        Topic topic = topicMapper.selectById(topicId);
+        if (topic == null || !Boolean.TRUE.equals(topic.getIsActive())) {
+            return; // 主题词已删除或停用，丢弃任务
+        }
+
+        // 扩展结果已在投递时写入 Redis，这里直接命中缓存
+        List<String> expanded = aiService.expandTopic(topic.getText());
+        List<String> matched = aiService.preMatch(item.getContent(), expanded);
+
+        FeedbackAnalysis analysis = aiService.analyzeFeedback(item, matched);
+
+        // 归属判断：命中扩展词（字面）或 AI 判定的主题与该主题词相关（语义）
+        boolean topicMatched = !matched.isEmpty() || isTopicRelated(analysis, topic.getText());
+        if (!topicMatched) {
+            return;
+        }
+
+        Feedback saved = processService.saveFeedback(item, analysis, topic.getId());
+        if (saved != null) {
+            // 主题命中计数（驱动关键词调优闭环）
+            topicMapper.update(null, new LambdaUpdateWrapper<Topic>()
+                    .eq(Topic::getId, topic.getId())
+                    .setSql("hit_count = hit_count + 1"));
+        }
     }
 
     /**
@@ -156,12 +178,8 @@ public class InsightService {
                 continue;
             }
 
-            // 静默期：一段时间内已告警过的同主题不再重复告警
-            Long recent = alertMapper.selectCount(new LambdaQueryWrapper<Alert>()
-                    .eq(Alert::getType, "surge")
-                    .like(Alert::getTitle, topicText)
-                    .ge(Alert::getCreatedAt, cooldownFrom));
-            if (recent > 0) {
+            // 静默期：Redis 冷却 key 快速判断（TTL 即静默期），DB 查询兜底
+            if (inSurgeCooldown(topicText, cooldownFrom)) {
                 continue;
             }
 
@@ -173,6 +191,7 @@ public class InsightService {
                     topicText, count));
             alert.setUrgency("action");
             alertMapper.insert(alert);
+            markSurgeCooldown(topicText);
 
             notifyService.push("alert", Map.of(
                     "id", alert.getId(),
@@ -181,6 +200,32 @@ public class InsightService {
                     "urgency", alert.getUrgency()
             ));
             log.info("主题突增预警：{}（{} 条/24h）", topicText, count);
+        }
+    }
+
+    /** 冷却判断：优先 Redis；Redis 不可用时回退原 DB 查询 */
+    private boolean inSurgeCooldown(String topicText, LocalDateTime cooldownFrom) {
+        try {
+            if (Boolean.TRUE.equals(redisTemplate.hasKey(SURGE_COOLDOWN_KEY + topicText))) {
+                return true;
+            }
+        } catch (Exception e) {
+            log.warn("Redis 冷却判断不可用，回退数据库查询: {}", e.getMessage());
+        }
+        Long recent = alertMapper.selectCount(new LambdaQueryWrapper<Alert>()
+                .eq(Alert::getType, "surge")
+                .like(Alert::getTitle, topicText)
+                .ge(Alert::getCreatedAt, cooldownFrom));
+        return recent > 0;
+    }
+
+    /** 告警落库后写入冷却 key，TTL 到期自动解除静默 */
+    private void markSurgeCooldown(String topicText) {
+        try {
+            redisTemplate.opsForValue().set(
+                    SURGE_COOLDOWN_KEY + topicText, "1", Duration.ofHours(surgeCooldownHours));
+        } catch (Exception e) {
+            log.warn("写入突增冷却失败: {}", e.getMessage());
         }
     }
 }

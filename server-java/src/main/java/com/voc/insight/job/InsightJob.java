@@ -21,8 +21,8 @@ public class InsightJob {
     public void run() {
         log.info("========== 开始定时分析 ==========");
         try {
-            int created = insightService.runCheck();
-            log.info("========== 定时分析完成，新增 {} 条 ==========", created);
+            int queued = insightService.runCheck();
+            log.info("========== 定时分析完成，投递 {} 个任务 ==========", queued);
         } catch (Exception e) {
             log.error("定时分析失败: {}", e.getMessage(), e);
         }

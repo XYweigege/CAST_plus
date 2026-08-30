@@ -1,36 +1,46 @@
-import { io, Socket } from 'socket.io-client';
+/**
+ * 实时推送通道（SSE / Server-Sent Events）。
+ * Java 后端通过 GET /api/notify/stream 单向广播，浏览器 EventSource 自动重连。
+ * 导出的函数签名与原 Socket.IO 版本保持一致，调用方无需改动。
+ */
+let eventSource: EventSource | null = null;
 
-let socket: Socket | null = null;
+function getEventSource(): EventSource {
+  if (!eventSource || eventSource.readyState === EventSource.CLOSED) {
+    eventSource = new EventSource('/api/notify/stream');
 
-export function getSocket(): Socket {
-  if (!socket) {
-    socket = io(window.location.origin, {
-      path: '/socket.io',
-      transports: ['websocket', 'polling']
-    });
+    eventSource.onopen = () => {
+      console.log('SSE connected');
+    };
 
-    socket.on('connect', () => {
-      console.log('Socket connected:', socket?.id);
-    });
-
-    socket.on('disconnect', () => {
-      console.log('Socket disconnected');
-    });
-
-    socket.on('connect_error', (error) => {
-      console.error('Socket connection error:', error);
-    });
+    eventSource.onerror = () => {
+      // EventSource 会自动重连，仅记录
+      console.warn('SSE connection error, retrying...');
+    };
   }
-
-  return socket;
+  return eventSource;
 }
 
-export function subscribeToTopics(topics: string[]): void {
-  getSocket().emit('subscribe', topics);
+function addListener<T>(event: string, callback: (payload: T) => void): () => void {
+  const es = getEventSource();
+  const handler = (e: MessageEvent) => {
+    try {
+      callback(JSON.parse(e.data));
+    } catch {
+      // 忽略无法解析的消息
+    }
+  };
+  es.addEventListener(event, handler);
+  return () => es.removeEventListener(event, handler);
 }
 
-export function unsubscribeFromTopics(topics: string[]): void {
-  getSocket().emit('unsubscribe', topics);
+/** SSE 为全量广播，无订阅概念，保留空实现兼容原调用 */
+export function subscribeToTopics(_topics: string[]): void {
+  getEventSource(); // 确保连接已建立
+}
+
+export function unsubscribeFromTopics(_topics: string[]): void {
+  // no-op
 }
 
 export interface FeedbackEvent {
@@ -50,20 +60,16 @@ export interface AlertEvent {
 }
 
 export function onNewFeedback(callback: (feedback: FeedbackEvent) => void): () => void {
-  const s = getSocket();
-  s.on('feedback:new', callback);
-  return () => s.off('feedback:new', callback);
+  return addListener<FeedbackEvent>('feedback:new', callback);
 }
 
 export function onAlert(callback: (alert: AlertEvent) => void): () => void {
-  const s = getSocket();
-  s.on('alert', callback);
-  return () => s.off('alert', callback);
+  return addListener<AlertEvent>('alert', callback);
 }
 
 export function disconnectSocket(): void {
-  if (socket) {
-    socket.disconnect();
-    socket = null;
+  if (eventSource) {
+    eventSource.close();
+    eventSource = null;
   }
 }

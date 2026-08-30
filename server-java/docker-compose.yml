@@ -19,5 +19,31 @@ services:
       --collation-server=utf8mb4_unicode_ci
       --default-authentication-plugin=mysql_native_password
 
+  redis:
+    image: redis:7-alpine
+    container_name: voc-redis
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - voc-redis-data:/data
+    command: redis-server --appendonly yes
+
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    container_name: voc-rabbitmq
+    restart: always
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+      TZ: Asia/Shanghai
+    ports:
+      - "5672:5672"     # AMQP
+      - "15672:15672"   # 管理控制台 http://localhost:15672 (guest/guest)
+    volumes:
+      - voc-rabbitmq-data:/var/lib/rabbitmq
+
 volumes:
   voc-mysql-data:
+  voc-redis-data:
+  voc-rabbitmq-data:

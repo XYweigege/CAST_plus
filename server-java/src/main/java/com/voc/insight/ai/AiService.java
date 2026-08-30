@@ -9,15 +9,18 @@ import com.voc.insight.entity.Feedback;
 import com.voc.insight.vo.InsightReport;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.util.DigestUtils;
 
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 /**
@@ -29,21 +32,28 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class AiService {
 
+    /** 主题词扩展缓存 key 前缀（按主题词内容哈希，改词即自然失效） */
+    private static final String EXPAND_CACHE_KEY = "voc:topic:expand:";
+    /** 扩展结果缓存 7 天；AI 失败/未配置时的兜底结果只缓存 10 分钟，避免污染 */
+    private static final Duration EXPAND_CACHE_TTL = Duration.ofDays(7);
+    private static final Duration EXPAND_FALLBACK_TTL = Duration.ofMinutes(10);
+
     private final AiClient aiClient;
     private final PromptBuilder promptBuilder;
+    private final StringRedisTemplate redisTemplate;
     private final ObjectMapper objectMapper = new ObjectMapper();
-
-    /** 主题词扩展结果缓存，同一主题词不重复调用 AI */
-    private final Map<String, List<String>> expansionCache = new ConcurrentHashMap<>();
 
     // ========== 主题词扩展 ==========
 
     /**
      * 把书面业务术语扩展为客户口语表达变体。
      * 解决"业务人员维护书面语、客户说的是口语"导致的匹配召回率低的问题。
+     * 结果缓存到 Redis：重启不丢、多实例共享，同一主题词不重复调用 AI。
      */
     public List<String> expandTopic(String topic) {
-        List<String> cached = expansionCache.get(topic);
+        String cacheKey = EXPAND_CACHE_KEY
+                + DigestUtils.md5DigestAsHex(topic.getBytes(StandardCharsets.UTF_8));
+        List<String> cached = getCachedExpansions(cacheKey);
         if (cached != null) {
             return cached;
         }
@@ -52,7 +62,7 @@ public class AiService {
 
         if (!aiClient.isConfigured()) {
             List<String> result = merge(topic, coreTerms, List.of());
-            expansionCache.put(topic, result);
+            cacheExpansions(cacheKey, result, EXPAND_FALLBACK_TTL);
             return result;
         }
 
@@ -60,14 +70,41 @@ public class AiService {
             String content = aiClient.chat(promptBuilder.buildExpandPrompt(), topic, 0.2, 400);
             List<String> parsed = parseStringArray(content);
             List<String> result = merge(topic, coreTerms, parsed);
-            expansionCache.put(topic, result);
+            cacheExpansions(cacheKey, result, EXPAND_CACHE_TTL);
             log.info("主题词扩展 [{}] -> {} 个变体", topic, result.size());
             return result;
         } catch (Exception e) {
             log.error("主题词扩展失败: {}", e.getMessage());
             List<String> fallback = merge(topic, coreTerms, List.of());
-            expansionCache.put(topic, fallback);
+            cacheExpansions(cacheKey, fallback, EXPAND_FALLBACK_TTL);
             return fallback;
+        }
+    }
+
+    /** 读扩展缓存；Redis 不可用时返回 null（直接走 AI，不影响主流程） */
+    private List<String> getCachedExpansions(String cacheKey) {
+        try {
+            String json = redisTemplate.opsForValue().get(cacheKey);
+            if (json == null) {
+                return null;
+            }
+            List<String> result = new ArrayList<>();
+            for (JsonNode node : objectMapper.readTree(json)) {
+                result.add(node.asText());
+            }
+            return result;
+        } catch (Exception e) {
+            log.warn("读取扩展缓存失败，直接调用 AI: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    /** 写扩展缓存；失败仅记日志，不影响主流程 */
+    private void cacheExpansions(String cacheKey, List<String> result, Duration ttl) {
+        try {
+            redisTemplate.opsForValue().set(cacheKey, objectMapper.writeValueAsString(result), ttl);
+        } catch (Exception e) {
+            log.warn("写入扩展缓存失败: {}", e.getMessage());
         }
     }
 

@@ -14,6 +14,8 @@ interface FeedbackTableProps {
   totalPages: number;
   onPageChange: (page: number) => void;
   onReview: (id: string, sentiment: string) => void;
+  /** topicId -> 主题词文本（Java 端反馈不内嵌 topic 对象，用映射补齐） */
+  topicMap?: Record<string, string>;
 }
 
 function parseTopics(raw: string | null): string[] {
@@ -32,7 +34,8 @@ export default function FeedbackTable({
   page,
   totalPages,
   onPageChange,
-  onReview
+  onReview,
+  topicMap
 }: FeedbackTableProps) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
@@ -250,7 +253,12 @@ export default function FeedbackTable({
                                   value={row.confidence != null ? `${(row.confidence * 100).toFixed(0)}%` : '—'}
                                 />
                                 <MetaRow label="主题标签" value={topics.length ? topics.join('、') : '—'} />
-                                {row.topic && <MetaRow label="归属主题词" value={row.topic.text} />}
+                                {(row.topic?.text || (row.topicId && topicMap?.[row.topicId])) && (
+                                  <MetaRow
+                                    label="归属主题词"
+                                    value={row.topic?.text ?? topicMap![row.topicId!]}
+                                  />
+                                )}
                                 {row.authorName && <MetaRow label="客户" value={row.authorName} />}
                                 {row.publishedAt && (
                                   <MetaRow label="反馈时间" value={formatDateTime(row.publishedAt)} />
