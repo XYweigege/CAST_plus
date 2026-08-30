@@ -1,15 +1,12 @@
 import nodemailer from 'nodemailer';
 
-interface Hotspot {
-  id: string;
+export interface AlertMailPayload {
   title: string;
   content: string;
-  url: string;
-  source: string;
-  importance: string;
-  relevance: number;
-  summary: string | null;
-  createdAt: Date;
+  urgency: string;
+  topics: string[];
+  productLine: string | null;
+  rating: number | null;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -17,7 +14,6 @@ let transporter: any = null;
 
 function getTransporter(): any {
   if (!process.env.SMTP_HOST || !process.env.SMTP_USER || !process.env.SMTP_PASS) {
-    console.warn('Email configuration incomplete, notifications disabled');
     return null;
   }
 
@@ -36,27 +32,28 @@ function getTransporter(): any {
   return transporter;
 }
 
-export async function sendHotspotEmail(hotspot: Hotspot & { keyword?: { text: string } | null }): Promise<boolean> {
+const URGENCY_STYLE: Record<string, { label: string; color: string }> = {
+  critical: { label: '紧急', color: '#dc2626' },
+  action: { label: '需处理', color: '#ea580c' },
+  attention: { label: '需关注', color: '#d97706' },
+  info: { label: '一般', color: '#059669' }
+};
+
+/** 发送单条客户反馈预警邮件 */
+export async function sendAlertEmail(payload: AlertMailPayload): Promise<boolean> {
   const mailer = getTransporter();
-  
+
   if (!mailer || !process.env.NOTIFY_EMAIL) {
     return false;
   }
 
-  const importanceEmoji: Record<string, string> = {
-    low: '📌',
-    medium: '⚡',
-    high: '🔥',
-    urgent: '🚨'
-  };
-
-  const emoji = importanceEmoji[hotspot.importance] || '📌';
+  const style = URGENCY_STYLE[payload.urgency] ?? URGENCY_STYLE.info;
 
   try {
     await mailer.sendMail({
       from: process.env.SMTP_USER,
       to: process.env.NOTIFY_EMAIL,
-      subject: `${emoji} 热点监控: ${hotspot.title.slice(0, 50)}`,
+      subject: `[${style.label}] 客户反馈预警：${payload.topics[0] ?? '需跟进'}`,
       html: `
         <!DOCTYPE html>
         <html>
@@ -65,38 +62,29 @@ export async function sendHotspotEmail(hotspot: Hotspot & { keyword?: { text: st
           <style>
             body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
             .container { max-width: 600px; margin: 0 auto; padding: 20px; }
-            .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 20px; border-radius: 8px 8px 0 0; }
+            .header { background: #1e3a8a; color: white; padding: 20px; border-radius: 8px 8px 0 0; }
             .content { background: #f8f9fa; padding: 20px; border-radius: 0 0 8px 8px; }
-            .badge { display: inline-block; padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; }
-            .badge-urgent { background: #ff4757; color: white; }
-            .badge-high { background: #ff6b35; color: white; }
-            .badge-medium { background: #ffa502; color: white; }
-            .badge-low { background: #2ed573; color: white; }
+            .badge { display: inline-block; padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; color: #fff; }
             .meta { color: #666; font-size: 14px; margin: 10px 0; }
-            .button { display: inline-block; background: #667eea; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px; margin-top: 15px; }
+            .summary { background: #fff; border-left: 4px solid #1e3a8a; padding: 12px 16px; margin: 16px 0; }
           </style>
         </head>
         <body>
           <div class="container">
             <div class="header">
-              <h1 style="margin: 0;">${emoji} 发现新热点</h1>
-              <p style="margin: 10px 0 0; opacity: 0.9;">来自热点监控系统</p>
+              <h2 style="margin: 0;">客户反馈预警</h2>
+              <p style="margin: 8px 0 0; opacity: 0.85; font-size: 13px;">保险客户声音智能分析系统</p>
             </div>
             <div class="content">
-              <h2 style="margin-top: 0;">${hotspot.title}</h2>
-              
-              <p><span class="badge badge-${hotspot.importance}">${hotspot.importance.toUpperCase()}</span></p>
-              
-              ${hotspot.summary ? `<p><strong>摘要：</strong>${hotspot.summary}</p>` : ''}
-              
+              <p><span class="badge" style="background:${style.color}">${style.label}</span></p>
+              <h3 style="margin-top: 16px;">${payload.title}</h3>
+              <div class="summary">${payload.content}</div>
               <div class="meta">
-                <p><strong>来源：</strong>${hotspot.source}</p>
-                <p><strong>相关性评分：</strong>${hotspot.relevance}/100</p>
-                ${hotspot.keyword ? `<p><strong>关键词：</strong>${hotspot.keyword.text}</p>` : ''}
-                <p><strong>发现时间：</strong>${new Date(hotspot.createdAt).toLocaleString('zh-CN')}</p>
+                <p><strong>主题标签：</strong>${payload.topics.join('、') || '—'}</p>
+                <p><strong>产品线：</strong>${payload.productLine ?? '—'}</p>
+                <p><strong>客户评分：</strong>${payload.rating != null ? payload.rating + ' / 5' : '—'}</p>
+                <p><strong>触发时间：</strong>${new Date().toLocaleString('zh-HK')}</p>
               </div>
-              
-              <a href="${hotspot.url}" class="button">查看原文 →</a>
             </div>
           </div>
         </body>
@@ -104,54 +92,69 @@ export async function sendHotspotEmail(hotspot: Hotspot & { keyword?: { text: st
       `
     });
 
-    console.log(`Email sent for hotspot: ${hotspot.id}`);
     return true;
   } catch (error) {
-    console.error('Failed to send email:', error);
+    console.error('Failed to send alert email:', error);
     return false;
   }
 }
 
-export async function sendDigestEmail(hotspots: Hotspot[]): Promise<boolean> {
+export interface DigestRow {
+  id: string;
+  content: string;
+  urgency: string;
+  sentiment: string;
+  topics: string | null;
+  aiSummary: string | null;
+  productLine: string | null;
+}
+
+/** 发送每日客户声音摘要邮件 */
+export async function sendDigestEmail(rows: DigestRow[]): Promise<boolean> {
   const mailer = getTransporter();
-  
-  if (!mailer || !process.env.NOTIFY_EMAIL || hotspots.length === 0) {
+
+  if (!mailer || !process.env.NOTIFY_EMAIL || rows.length === 0) {
     return false;
   }
 
-  try {
-    const hotspotsHtml = hotspots.map(h => `
-      <tr>
-        <td style="padding: 10px; border-bottom: 1px solid #eee;">
-          <a href="${h.url}" style="color: #667eea; text-decoration: none;">${h.title.slice(0, 60)}...</a>
-        </td>
-        <td style="padding: 10px; border-bottom: 1px solid #eee;">${h.source}</td>
-        <td style="padding: 10px; border-bottom: 1px solid #eee;">${h.importance}</td>
-      </tr>
-    `).join('');
+  const negativeCount = rows.filter(r => r.sentiment === 'negative').length;
 
+  const rowsHtml = rows.map(r => {
+    const style = URGENCY_STYLE[r.urgency] ?? URGENCY_STYLE.info;
+    return `
+      <tr>
+        <td style="padding: 10px; border-bottom: 1px solid #eee; max-width: 320px;">
+          ${(r.aiSummary || r.content).slice(0, 70)}
+        </td>
+        <td style="padding: 10px; border-bottom: 1px solid #eee;">${r.productLine ?? '—'}</td>
+        <td style="padding: 10px; border-bottom: 1px solid #eee;">
+          <span style="color:${style.color};font-weight:600">${style.label}</span>
+        </td>
+      </tr>
+    `;
+  }).join('');
+
+  try {
     await mailer.sendMail({
       from: process.env.SMTP_USER,
       to: process.env.NOTIFY_EMAIL,
-      subject: `📊 热点监控日报 - ${hotspots.length} 条新热点`,
+      subject: `客户声音日报：${rows.length} 条反馈，${negativeCount} 条负面`,
       html: `
         <!DOCTYPE html>
         <html>
         <head><meta charset="utf-8"></head>
         <body style="font-family: -apple-system, BlinkMacSystemFont, sans-serif;">
-          <h1>📊 热点监控日报</h1>
-          <p>过去 24 小时发现 <strong>${hotspots.length}</strong> 条新热点</p>
-          <table style="width: 100%; border-collapse: collapse;">
+          <h2>客户声音日报</h2>
+          <p>过去 24 小时新增 <strong>${rows.length}</strong> 条反馈，其中负面 <strong>${negativeCount}</strong> 条。</p>
+          <table style="width: 100%; border-collapse: collapse; font-size: 14px;">
             <thead>
-              <tr style="background: #f8f9fa;">
-                <th style="padding: 10px; text-align: left;">标题</th>
-                <th style="padding: 10px; text-align: left;">来源</th>
-                <th style="padding: 10px; text-align: left;">重要性</th>
+              <tr style="background: #f1f5f9;">
+                <th style="padding: 10px; text-align: left;">AI 归因</th>
+                <th style="padding: 10px; text-align: left;">产品线</th>
+                <th style="padding: 10px; text-align: left;">紧急度</th>
               </tr>
             </thead>
-            <tbody>
-              ${hotspotsHtml}
-            </tbody>
+            <tbody>${rowsHtml}</tbody>
           </table>
         </body>
         </html>

@@ -1,5 +1,5 @@
 {
-  "name": "client",
+  "name": "insurance-voc-insight-client",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -12,7 +12,6 @@
   "dependencies": {
     "@tailwindcss/vite": "^4.1.18",
     "clsx": "^2.1.1",
-    "framer-motion": "^12.31.1",
     "lucide-react": "^0.563.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",

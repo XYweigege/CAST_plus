@@ -1,8 +1,9 @@
 {
-  "name": "yupi-hot-monitor-server",
+  "name": "insurance-voc-insight-server",
   "version": "1.0.0",
   "type": "module",
   "main": "dist/index.js",
+  "description": "保险客户声音（VoC）智能分析系统 - 服务端",
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
@@ -12,17 +13,20 @@
     "db:studio": "prisma studio",
     "db:push": "prisma db push",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "eval": "vitest run src/__tests__/aiRelevance.test.ts"
   },
-  "keywords": [],
+  "keywords": [
+    "insurance",
+    "voice-of-customer",
+    "llm",
+    "sentiment-analysis"
+  ],
   "author": "",
   "license": "ISC",
-  "description": "",
   "dependencies": {
     "@openrouter/sdk": "^0.5.1",
     "@prisma/client": "^6.19.2",
-    "axios": "^1.13.4",
-    "cheerio": "^1.1.0",
     "cors": "^2.8.6",
     "dotenv": "^17.2.3",
     "express": "^5.2.1",

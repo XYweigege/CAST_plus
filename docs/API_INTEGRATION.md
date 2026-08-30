@@ -1,510 +1,223 @@
-# 🔌 API 集成技术文档
+# 数据源接入指南
 
-## 1. OpenRouter API 集成
+本文件说明如何把内置的演示语料替换为真实业务数据源，以及各接口的调用方式。
 
-### 1.1 SDK 安装
+---
 
-```bash
-npm install @openrouter/sdk
+## 一、当前数据链路
+
+```
+fetchNewFeedback()              采集一批新增反馈（当前返回演示语料）
+        ↓
+expandTopic()                   主题词扩展为客户口语表达
+        ↓
+preMatchTopic()                 文本预匹配，未命中则跳过，节省 AI 调用
+        ↓
+analyzeFeedback()               LLM 结构化标注
+        ↓
+落库 + 命中计数 + 预警判定
+        ↓
+detectSurge()                   主题突增检测
 ```
 
-### 1.2 基本配置
+主流程在 `server/src/jobs/insightRunner.ts`。
+
+---
+
+## 二、接入真实数据源
+
+### 2.1 替换采集函数
+
+编辑 `server/src/jobs/insightRunner.ts` 中的 `fetchNewFeedback()`：
 
 ```typescript
-import { OpenRouter } from "@openrouter/sdk";
+async function fetchNewFeedback(): Promise<FeedbackItem[]> {
+  // 替换前：演示语料
+  // return generateDemoFeedback(BATCH_SIZE);
 
-const openRouter = new OpenRouter({
-  apiKey: process.env.OPENROUTER_API_KEY ?? "",
-});
-```
+  // 替换后：从业务系统拉取
+  const [surveys, claims, tickets] = await Promise.all([
+    fetchSurveyAnswers(since),
+    fetchClaimFeedback(since),
+    fetchServiceTickets(since)
+  ]);
 
-### 1.3 Chat Completion 调用
-
-```typescript
-// 非流式调用
-async function analyzeHotspot(content: string) {
-  const result = await openRouter.chat.send({
-    model: "openai/gpt-4",
-    messages: [
-      {
-        role: "system",
-        content: `你是一个热点分析专家，请分析以下内容：
-1. 判断是否为真实的热点新闻（排除标题党、假新闻）
-2. 评估该热点与 AI 编程领域的相关性（0-100分）
-3. 评估热点的重要程度（low/medium/high/urgent）
-4. 生成简短摘要（50字以内）
-
-输出 JSON 格式：
-{
-  "isReal": true/false,
-  "relevance": 0-100,
-  "importance": "low/medium/high/urgent",
-  "summary": "..."
-}`
-      },
-      {
-        role: "user",
-        content: content
-      }
-    ],
-    stream: false,
-    temperature: 0.3,
-    maxTokens: 500
-  });
-
-  return JSON.parse(result.choices[0].message.content);
+  return [...surveys, ...claims, ...tickets].map(toFeedbackItem);
 }
 ```
 
-### 1.4 响应格式
+返回值需满足 `FeedbackItem`（见 `server/src/types.ts`）：
+
+| 字段 | 必填 | 说明 |
+|------|------|------|
+| `content` | ✅ | 反馈正文 |
+| `source` | ✅ | 渠道编码，见 `constants.ts` 的 `SOURCES` |
+| `sourceId` | 建议 | 业务系统内的唯一 ID，用于去重；**不填会导致重复入库** |
+| `rating` | 可选 | 客户评分 1-5，有助于 AI 判定 |
+| `productLine` | 可选 | 产品线编码 |
+| `language` | 可选 | `zh-HK` / `en` / `mixed`，不填则由 `detectLanguage` 推断 |
+| `publishedAt` | 可选 | 反馈发生时间 |
+
+### 2.2 字段映射示例
+
+```typescript
+function toFeedbackItem(row: SurveyRow): FeedbackItem {
+  return {
+    content: row.open_answer,
+    source: 'survey',
+    sourceId: `survey-${row.id}`,          // 必须全局唯一
+    rating: row.nps_score,                  // 若是 NPS 0-10 需换算
+    productLine: mapProduct(row.product_code),
+    authorName: maskName(row.customer_name),// 出境前脱敏
+    publishedAt: new Date(row.submitted_at)
+  };
+}
+```
+
+### 2.3 按需接入各渠道
+
+| 渠道 | 常见接入方式 | 注意 |
+|------|------------|------|
+| 问卷 | 问卷系统 Open API，按提交时间增量拉取 | NPS 0-10 与 CSAT 1-5 需统一换算 |
+| 索赔 | 索赔系统工单表定时导出或视图 | 关注结案评价字段与拒赔标记 |
+| 客服工单 | 工单系统 API / 数据库只读副本 | 需剥离客服内部备注，只保留客户原话 |
+| 社媒 | 平台公开接口 | 仅取公开内容，注意平台条款 |
+| 应用商店 | 官方 API 或定期导出 | 评论自带评分，可直接映射 |
+| 邮件 | 邮件系统归档 | 需去除签名档与历史引用 |
+
+---
+
+## 三、文件导入（无需对接接口）
+
+适合一次性导入历史数据做回测。
+
+### JSON 格式
 
 ```json
-{
-  "id": "chatcmpl-xxxxxxxxxxxxxxxxx",
-  "object": "chat.completion",
-  "created": 1677652288,
-  "model": "openai/gpt-4",
-  "choices": [
-    {
-      "index": 0,
-      "message": {
-        "role": "assistant",
-        "content": "{\"isReal\": true, \"relevance\": 85, \"importance\": \"high\", \"summary\": \"...\"}"
-      },
-      "finish_reason": "stop"
-    }
-  ],
-  "usage": {
-    "prompt_tokens": 10,
-    "completion_tokens": 15,
-    "total_tokens": 25
+[
+  {
+    "content": "理賠拖咗三個星期都未批",
+    "source": "claim",
+    "sourceId": "claim-10086",
+    "rating": 1,
+    "productLine": "medical",
+    "publishedAt": "2026-08-01T10:00:00Z"
   }
-}
+]
 ```
 
----
+也接受 `{ "data": [...] }` 包装。
 
-## 2. Twitter API (twitterapi.io) 集成
+### CSV 格式
 
-### 2.1 认证
+首行为表头，必须包含 `content` 列（或 `text`）：
 
-```typescript
-const TWITTER_API_BASE = 'https://api.twitterapi.io';
-const TWITTER_API_KEY = process.env.TWITTER_API_KEY;
-
-const headers = {
-  'X-API-Key': TWITTER_API_KEY,
-  'Content-Type': 'application/json'
-};
+```csv
+content,source,sourceId,rating,productLine
+理賠拖咗好耐,claim,c-001,1,medical
+Claim rejected,claim,c-002,1,travel
 ```
 
-### 2.2 高级搜索 API
-
-**Endpoint:** `GET /twitter/tweet/advanced_search`
-
-**参数:**
-- `query` (string, required): 搜索查询，支持高级语法
-- `queryType` (enum, required): `Latest` 或 `Top`
-- `cursor` (string, optional): 分页游标
-
-**查询语法示例:**
-```
-"AI" OR "GPT" lang:en since:2024-01-01
-from:OpenAI OR from:Anthropic
-#AINews min_faves:100
-```
-
-**请求示例:**
-
-```typescript
-async function searchTwitter(query: string, cursor?: string) {
-  const params = new URLSearchParams({
-    query: query,
-    queryType: 'Latest'
-  });
-  
-  if (cursor) {
-    params.append('cursor', cursor);
-  }
-
-  const response = await fetch(
-    `${TWITTER_API_BASE}/twitter/tweet/advanced_search?${params}`,
-    { headers }
-  );
-
-  return response.json();
-}
-```
-
-**响应格式:**
-
-```json
-{
-  "tweets": [
-    {
-      "type": "tweet",
-      "id": "1234567890",
-      "url": "https://twitter.com/user/status/1234567890",
-      "text": "Breaking: OpenAI announces GPT-5...",
-      "source": "Twitter Web App",
-      "retweetCount": 1500,
-      "replyCount": 300,
-      "likeCount": 5000,
-      "quoteCount": 200,
-      "viewCount": 150000,
-      "createdAt": "2024-01-15T10:30:00Z",
-      "lang": "en",
-      "author": {
-        "userName": "techreporter",
-        "name": "Tech Reporter",
-        "isBlueVerified": true,
-        "followers": 50000,
-        "profilePicture": "https://..."
-      },
-      "entities": {
-        "hashtags": [{ "text": "AI" }],
-        "urls": [{ "expanded_url": "https://..." }]
-      }
-    }
-  ],
-  "has_next_page": true,
-  "next_cursor": "xxxx"
-}
-```
-
-### 2.3 获取热门趋势
-
-**Endpoint:** `GET /twitter/trends`
-
-```typescript
-async function getTrends(woeid: number = 1) { // 1 = Worldwide
-  const response = await fetch(
-    `${TWITTER_API_BASE}/twitter/trends?woeid=${woeid}`,
-    { headers }
-  );
-  return response.json();
-}
-```
-
----
-
-## 3. 网页搜索爬虫
-
-### 3.1 Bing 搜索爬虫
-
-```typescript
-import axios from 'axios';
-import * as cheerio from 'cheerio';
-
-const USER_AGENTS = [
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36...',
-  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36...',
-];
-
-async function searchBing(query: string): Promise<SearchResult[]> {
-  const userAgent = USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
-  
-  const response = await axios.get('https://www.bing.com/search', {
-    params: { q: query },
-    headers: { 'User-Agent': userAgent }
-  });
-
-  const $ = cheerio.load(response.data);
-  const results: SearchResult[] = [];
-
-  $('li.b_algo').each((_, element) => {
-    const title = $(element).find('h2 a').text();
-    const url = $(element).find('h2 a').attr('href');
-    const snippet = $(element).find('.b_caption p').text();
-    
-    if (title && url) {
-      results.push({ title, url, snippet, source: 'bing' });
-    }
-  });
-
-  return results;
-}
-```
-
-### 3.2 频率控制
-
-```typescript
-class RateLimiter {
-  private queue: (() => Promise<void>)[] = [];
-  private processing = false;
-  private lastRequestTime = 0;
-  private minInterval = 5000; // 5 秒间隔
-
-  async add<T>(fn: () => Promise<T>): Promise<T> {
-    return new Promise((resolve, reject) => {
-      this.queue.push(async () => {
-        try {
-          const result = await fn();
-          resolve(result);
-        } catch (error) {
-          reject(error);
-        }
-      });
-      this.process();
-    });
-  }
-
-  private async process() {
-    if (this.processing || this.queue.length === 0) return;
-    
-    this.processing = true;
-    
-    while (this.queue.length > 0) {
-      const elapsed = Date.now() - this.lastRequestTime;
-      if (elapsed < this.minInterval) {
-        await new Promise(r => setTimeout(r, this.minInterval - elapsed));
-      }
-      
-      const task = this.queue.shift();
-      if (task) {
-        this.lastRequestTime = Date.now();
-        await task();
-      }
-    }
-    
-    this.processing = false;
-  }
-}
-```
-
----
-
-## 4. Prisma + SQLite 配置
-
-### 4.1 Schema 定义
-
-```prisma
-generator client {
-  provider = "prisma-client-js"
-}
-
-datasource db {
-  provider = "sqlite"
-  url      = env("DATABASE_URL")
-}
-
-model Keyword {
-  id        String    @id @default(uuid())
-  text      String    @unique
-  category  String?
-  isActive  Boolean   @default(true)
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
-  hotspots  Hotspot[]
-}
-
-model Hotspot {
-  id          String   @id @default(uuid())
-  title       String
-  content     String
-  url         String
-  source      String   // twitter, bing, google
-  sourceId    String?  // 原始推文ID等
-  isReal      Boolean  @default(true)
-  relevance   Int      @default(0)
-  importance  String   @default("low")
-  summary     String?
-  viewCount   Int?
-  likeCount   Int?
-  retweetCount Int?
-  publishedAt DateTime?
-  createdAt   DateTime @default(now())
-  keywordId   String?
-  keyword     Keyword? @relation(fields: [keywordId], references: [id])
-  
-  @@unique([url, source])
-}
-
-model Notification {
-  id        String   @id @default(uuid())
-  type      String   // hotspot, alert
-  title     String
-  content   String
-  isRead    Boolean  @default(false)
-  hotspotId String?
-  createdAt DateTime @default(now())
-}
-
-model Setting {
-  id    String @id @default(uuid())
-  key   String @unique
-  value String
-}
-```
-
-### 4.2 迁移命令
+### 调用
 
 ```bash
-# 初始化数据库
-npx prisma migrate dev --name init
-
-# 生成 Prisma Client
-npx prisma generate
+curl -X POST http://localhost:3001/api/feedbacks/import \
+  -H "Content-Type: application/json" \
+  -d '{"format":"csv","content":"content,source\n理賠好慢,claim"}'
 ```
 
-### 4.3 环境变量
+响应：
 
-```env
-DATABASE_URL="file:./dev.db"
+```json
+{ "total": 2, "created": 2 }
+```
+
+`created` 小于 `total` 通常是因为 `source + sourceId` 重复被跳过。
+
+---
+
+## 四、接口参考
+
+### 主题词
+
+```bash
+# 列表
+GET /api/topics
+
+# 创建
+curl -X POST http://localhost:3001/api/topics \
+  -H "Content-Type: application/json" \
+  -d '{"text":"理赔时效"}'
+
+# AI 扩展口语变体
+curl -X POST http://localhost:3001/api/topics/{id}/expand
+
+# 确认启用
+curl -X PATCH http://localhost:3001/api/topics/{id}/approve \
+  -H "Content-Type: application/json" -d '{"approved":true}'
+```
+
+### 反馈
+
+```bash
+# 筛选查询
+GET /api/feedbacks?sentiment=negative&urgency=critical&productLine=travel&sortBy=urgency&page=1&limit=20
+
+# 概览统计
+GET /api/feedbacks/stats
+
+# 归因报告
+GET /api/feedbacks/insight?productLine=travel
+
+# 单条即时分析
+curl -X POST http://localhost:3001/api/feedbacks/analyze \
+  -H "Content-Type: application/json" \
+  -d '{"content":"明明買咗全保，最後話唔賠，搵笨！","productLine":"travel"}'
+
+# 人工复核
+curl -X PATCH http://localhost:3001/api/feedbacks/{id}/review \
+  -H "Content-Type: application/json" \
+  -d '{"sentiment":"negative","topics":["拒赔争议"],"urgency":"critical"}'
+```
+
+### 预警
+
+```bash
+GET /api/alerts?unhandledOnly=true
+PATCH /api/alerts/{id}/handle
+```
+
+### 手动触发
+
+```bash
+curl -X POST http://localhost:3001/api/check-feedbacks
 ```
 
 ---
 
-## 5. Express + WebSocket 配置
+## 五、WebSocket
 
-### 5.1 服务器配置
+```javascript
+import { io } from 'socket.io-client';
 
-```typescript
-import express from 'express';
-import { createServer } from 'http';
-import { Server } from 'socket.io';
-import cors from 'cors';
+const socket = io('http://localhost:3001');
 
-const app = express();
-const httpServer = createServer(app);
-const io = new Server(httpServer, {
-  cors: {
-    origin: process.env.CLIENT_URL || 'http://localhost:5173',
-    methods: ['GET', 'POST']
-  }
+socket.emit('subscribe', ['理赔时效']);
+
+socket.on('feedback:new', (fb) => {
+  console.log('新反馈', fb.aiSummary, fb.urgency);
 });
 
-app.use(cors());
-app.use(express.json());
-
-// WebSocket 连接
-io.on('connection', (socket) => {
-  console.log('Client connected:', socket.id);
-  
-  socket.on('subscribe', (keywords: string[]) => {
-    keywords.forEach(kw => socket.join(`keyword:${kw}`));
-  });
-  
-  socket.on('disconnect', () => {
-    console.log('Client disconnected:', socket.id);
-  });
+socket.on('alert', (alert) => {
+  console.log('预警', alert.title, alert.urgency);
 });
-
-// 发送热点通知
-function notifyNewHotspot(hotspot: Hotspot) {
-  io.to(`keyword:${hotspot.keyword?.text}`).emit('hotspot:new', hotspot);
-  io.emit('notification', {
-    type: 'hotspot',
-    title: '发现新热点',
-    content: hotspot.title
-  });
-}
-
-export { app, httpServer, io, notifyNewHotspot };
-```
-
-### 5.2 路由结构
-
-```typescript
-// routes/keywords.ts
-import { Router } from 'express';
-import { prisma } from '../db';
-
-const router = Router();
-
-router.get('/', async (req, res) => {
-  const keywords = await prisma.keyword.findMany({
-    orderBy: { createdAt: 'desc' }
-  });
-  res.json(keywords);
-});
-
-router.post('/', async (req, res) => {
-  const { text, category } = req.body;
-  const keyword = await prisma.keyword.create({
-    data: { text, category }
-  });
-  res.status(201).json(keyword);
-});
-
-router.delete('/:id', async (req, res) => {
-  await prisma.keyword.delete({
-    where: { id: req.params.id }
-  });
-  res.status(204).send();
-});
-
-export default router;
 ```
 
 ---
 
-## 6. 定时任务配置
+## 六、接入时注意的合规事项
 
-```typescript
-import cron from 'node-cron';
-
-// 每 30 分钟执行一次热点检查
-cron.schedule('*/30 * * * *', async () => {
-  console.log('Running hotspot check...');
-  await checkHotspots();
-});
-
-async function checkHotspots() {
-  const keywords = await prisma.keyword.findMany({
-    where: { isActive: true }
-  });
-
-  for (const keyword of keywords) {
-    // 1. 从 Twitter 搜索
-    const tweets = await searchTwitter(keyword.text);
-    
-    // 2. 从 Bing 搜索
-    const webResults = await searchBing(keyword.text);
-    
-    // 3. AI 分析
-    for (const item of [...tweets, ...webResults]) {
-      const analysis = await analyzeHotspot(item.content);
-      
-      if (analysis.isReal && analysis.relevance > 60) {
-        // 4. 保存并通知
-        const hotspot = await saveHotspot(item, analysis, keyword);
-        notifyNewHotspot(hotspot);
-      }
-    }
-  }
-}
-```
-
----
-
-## 7. 邮件通知配置
-
-```typescript
-import nodemailer from 'nodemailer';
-
-const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST,
-  port: parseInt(process.env.SMTP_PORT || '587'),
-  secure: false,
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS
-  }
-});
-
-async function sendEmailNotification(hotspot: Hotspot) {
-  await transporter.sendMail({
-    from: process.env.SMTP_USER,
-    to: process.env.NOTIFY_EMAIL,
-    subject: `🔥 新热点: ${hotspot.title}`,
-    html: `
-      <h2>${hotspot.title}</h2>
-      <p>${hotspot.summary}</p>
-      <p><strong>重要程度:</strong> ${hotspot.importance}</p>
-      <p><strong>相关性:</strong> ${hotspot.relevance}%</p>
-      <p><a href="${hotspot.url}">查看原文</a></p>
-    `
-  });
-}
-```
+1. **数据脱敏**：客户姓名、联系方式、保单号在送往境外 LLM 前必须脱敏，或改用私有化部署模型处理含 PII 的字段
+2. **最小必要**：只采集分析所必需的字段，不要把整个客户档案灌进来
+3. **留存期限**：明确原始反馈的留存与清理策略
+4. **输出定位**：AI 归因与建议仅供内部参考，不作为对外结论，界面需明示

@@ -1,204 +1,287 @@
-# AI 热点监控工具
+# VoC Insight · 保险客户声音智能分析平台
 
-> 作者：[程序员鱼皮](https://yuyuanweb.feishu.cn/wiki/Abldw5WkjidySxkKxU2cQdAtnah)
->
-> 本项目为教学项目，提供完整视频教程 + 文字教程 + 简历写法 + 面试题解 + 答疑服务，帮你提升项目能力，给简历增加亮点！
->
-> ⭐️ 加入项目系列学习：[加入编程导航](https://www.codefather.cn/vip)
+> 汇聚多源客户反馈，用 LLM 完成情感判定、主题归因与风险分级，把「没人看的问卷开放题」变成「可行动的流程改进清单」。
 
+---
 
+## 一、要解决什么问题
 
-## 一、项目介绍
+保险公司的客户声音散落在四处：满意度问卷的开放题、索赔结案后的评价、客服工单记录、应用商店评论。它们的共同点是——**量很大，但基本没人系统性地看**。
 
-这是一套以 **AI 编程实战** 为核心的项目教程，基于 Express 5 + React 19 + OpenRouter + Socket.io，用 AI 编程的方式从 0 到 1 开发一个《AI 热点监控工具》，带你亲身体验 AI Vibe Coding 的完整工作流，学会用 AI 快速做出实用的提效工具！
+由此产生三个具体问题：
 
-📺 项目介绍视频，快速查看成品效果：https://bilibili.com/video/BV1g8d8B6ENk
+| 问题 | 现状 | 后果 |
+|------|------|------|
+| 标签靠人工维护 | 业务人员手工填写关键词与分类 | 覆盖不全，客户的新说法跟不上涨 |
+| 负面发现滞后 | 人工翻评论，T+1 甚至更久 | 拒赔、销售误导类高风险反馈错失介入窗口 |
+| 评分只看得见数字 | 知道某产品 NPS 掉了，不知道为什么 | 无法定位到具体业务环节，改进无从下手 |
 
-![](https://pic.yupi.icu/1/image-20260304102630302.png)
+本系统针对这三点，做的是**从人工管理到智能分析的升级**，而不是从零建一套系统。
 
-输入要监控的关键词，系统自动从 Twitter、Bing、HackerNews、搜狗、B 站等 **8+** 个信息源聚合抓取内容，利用 AI 进行真假识别和相关性分析，并通过 WebSocket 实时推送和邮件通知用户。此外，还将热点监控能力封装为 **Agent Skills 技能包**，让 Cursor、VSCode Copilot、Claude Code 等 AI 编程工具也能直接使用。
+---
 
+## 二、核心功能
 
+### 1. 多源反馈汇聚
 
-### 为什么做这个项目？
+统一入口接入 6 类渠道：客户问卷（`survey`）、索赔反馈（`claim`）、客服工单（`service`）、社媒公开内容（`social`）、应用商店评论（`appstore`）、客户邮件（`email`）。支持 CSV / JSON 文件批量导入。
 
-鱼皮作为 AI 编程博主，要利用工具第一时间自动发现最新的热点（比如 AI 大模型的更新），并且及时给我发送通知，让我能够走在吃瓜第一线。
+### 2. LLM 结构化标注
 
-既然如此，**不如做一个更通用的工具**。
+每条反馈由 AI 输出**六元组**，而非简单的正负面：
 
-这就是 AI 热点监控工具的起点：让 AI 帮你盯热点，第一时间获取优质信息！
+```json
+{
+  "sentiment": "negative",
+  "topics": ["理赔时效", "客服响应"],
+  "urgency": "critical",
+  "urgencyReason": "拒赔未给出清晰解释且明确表示将投诉至监管机构",
+  "aiSummary": "索赔审核周期过长且客服电话渠道无人接听",
+  "confidence": 0.93
+}
+```
 
-![](https://pic.yupi.icu/1/AI%E7%83%AD%E7%82%B9%E7%9B%91%E6%8E%A7%E5%AF%B9%E8%AF%9D%E6%A1%86.jpg)
+- `topics` 从预设的 12 个保险业务主题中选取，**不允许模型自造标签**，避免标签爆炸
+- `urgency` 四级定级，直接决定是否需要告警
+- `confidence` 低于阈值（0.7）的判定**不写入终态**，转人工复核
 
+### 3. 主题词智能扩展
 
+业务人员维护的是书面术语（如「理赔时效」），客户说的是口语（「拖咗好耐都未賠」）。直接字符串匹配召回率极低。
 
-### 6 大核心能力
+系统用 LLM 把业务术语翻译成客户口语表达变体，并构成闭环：
 
-1）配置监控关键词，支持激活 / 暂停。
+```
+人工录入主题词 → AI 扩展口语变体 → 人工确认启用 → 参与匹配并累计命中次数 → 淘汰零命中变体
+```
 
-![](https://pic.yupi.icu/1/image-20260304102804249.png)
+AI 生成的变体默认 `approved=false`、`isActive=false`，需人工确认后才生效——**模型负责穷举，人负责把关**。
 
+### 4. 分级预警
 
+`action` / `critical` 级别的反馈实时触发三级动作：WebSocket 推送到前端、写入预警中心、发送邮件。
 
-2）AI 自动从 8+ 数据源抓取和分析热点，利用 AI 进行查询扩展、真假识别、相关性分析和智能摘要。
+另有**主题突增检测**：某主题 24 小时内负面反馈超过阈值即触发预警，这往往是系统性问题的前兆，单条反馈看不出来。预警带 12 小时静默期，避免告警疲劳。
 
-![](https://pic.yupi.icu/1/image-20260304103025682.png)
+### 5. 评分归因报告
 
+针对某产品线，输出「评分为什么是这个数」：
 
+- **统计部分由代码完成**（反馈量、平均评分、负面占比、主题分布）——确定性计算，可复现
+- **归纳部分交给 LLM**（归因结论 + 改进建议）——基于负面反馈摘要归纳
 
-3）多维度筛选和排序，按来源、重要性、时间范围筛选，按热度、相关性、时间排序。
+刻意不让模型做计数任务，那是它不擅长且容易编造的地方。
 
-![](https://pic.yupi.icu/1/image-20260304103219366.png)
+---
 
+## 三、技术架构
 
+```
+┌──────────────────────────────────────────────────────────┐
+│  React 19 + Vite + TailwindCSS 4 + Framer Motion         │
+│  反馈洞察 │ 主题词管理 │ 评分归因 │ AI 试算                │
+└────────────────────────┬─────────────────────────────────┘
+                         │ REST + Socket.io 实时推送
+┌────────────────────────┴─────────────────────────────────┐
+│  Express 5                                                │
+│  ┌──────────┬──────────┬──────────┬───────────────────┐  │
+│  │ topics   │feedbacks │ alerts   │ settings          │  │
+│  └──────────┴──────────┴──────────┴───────────────────┘  │
+│  ┌────────────────────────────────────────────────────┐  │
+│  │ jobs/insightRunner  采集 → 扩展 → 分析 → 预警       │  │
+│  └────────────────────────────────────────────────────┘  │
+│  ┌──────────┬───────────────┬─────────────────────────┐  │
+│  │ ai.ts    │feedbackSource │ email.ts                │  │
+│  │ 标注+扩展│ 语料+导入解析 │ 预警邮件 + 日报          │  │
+│  └──────────┴───────────────┴─────────────────────────┘  │
+└────────────────────────┬─────────────────────────────────┘
+                         │ Prisma ORM
+                    ┌────┴─────┐
+                    │  SQLite  │
+                    └──────────┘
+```
 
-4）全网搜索，输入关键词从多个数据源聚合搜索。
+| 层级 | 技术 |
+|------|------|
+| 前端 | React 19 · Vite 7 · TailwindCSS 4 · Framer Motion · Socket.io-client |
+| 后端 | Node.js · Express 5 · Socket.io · node-cron |
+| 数据 | SQLite · Prisma 6 |
+| AI | OpenRouter（默认 `deepseek/deepseek-v3.2`，可用 `AI_MODEL` 覆盖） |
+| 测试 | Vitest |
 
-![](https://pic.yupi.icu/1/image-20260304103824666.png)
+---
 
+## 四、关键设计决策
 
+### 为什么不直接调情感分析 API
 
-5）实时通知，WebSocket 实时推送 + 邮件通知。
+通用情感模型只输出极性，不懂保险语义：
 
-![](https://pic.yupi.icu/1/image-20260304104139285.png)
+- 「當初 agent 話全保，原來一堆除外責任」—— 通用模型判为中性，实际是**销售误导**，合规高风险
+- 「個 app 好難用，upload document 次次 fail」—— 中英混排，通用模型容易漏判负面
+- 「Claim rejected... escalate to the Insurance Authority」—— 需要识别为**监管投诉升级信号**，而不只是"不满"
 
+而且业务要的不是极性，是「哪个环节出了问题、要不要现在处理」。
 
+### 多语言与方言处理
 
-6）Agent Skills 技能包，安装后在 Cursor、VSCode Copilot、Claude Code 中都能直接使用。
+香港客户的反馈是繁体中文、粤语口语、英文、中英混排的混合体。Prompt 中显式列出粤语负面表达（`唔賠`/`搵笨`/`搞咁耐`/`極不負責任`）并给出 few-shot 示例，覆盖四类语言形态。
 
-![](https://pic.yupi.icu/1/1772099941189-4fb78679-12ac-4b92-a7b4-b5b4645b09d4.png)
+### 人机协同而非全自动
 
+AI 判定置信度低于 0.7 时，记录标记 `isReviewed=false` 进入**待复核队列**，前端提供一键校正。人工修正后的结果即为终态（`confidence=1`），并可作为后续 few-shot 样本回流。
 
+这不是不信任模型，而是**让低置信度的判断有出口**——在合规敏感的保险场景，一条被误判的投诉比一条被漏标的赞美好得多。
 
-## 二、项目优势
+### 降级不中断
 
-本项目选题新颖，紧跟 AI 编程时代，以 **实用工具开发** 为导向，区别于增删改查的烂大街项目。项目内容精炼，**不到一周就能学完**，带你掌握 AI 编程的完整工作流，给你的简历和求职大幅增加竞争力！
+未配置 `OPENROUTER_API_KEY` 时，系统用规则兜底（负面词表 + 评分），流程照常跑通，只是质量下降。保证演示和开发不依赖外部服务。
 
-技术丰富，覆盖 AI 编程全链路：
+---
 
-![](https://pic.yupi.icu/1/image-20260304101227060.png)
+## 五、快速开始
 
-从这个项目中你可以学到：
-
-- 如何用 AI 编程从 0 到 1 开发一个完整的工具？
-- 如何安装和使用 MCP 增强 AI 能力？
-- 如何安装和使用 Agent Skills 提升 AI 编程质量？
-- 如何从多个信息源（Twitter、Bing、HN、B 站等）聚合抓取内容？
-- 如何通过 OpenRouter 接入 AI 大模型，实现智能内容审核？
-- 如何实现查询扩展（Query Expansion），提高信息检索的召回率？
-- 如何基于 Socket.io 实现 WebSocket 实时推送？
-- 如何使用 Aceternity UI 打造炫酷的科技感前端界面？
-- 如何开发标准化的 Agent Skills 技能包，并在多种 AI 工具中验证？
-- 如何在 AI 编程中进行人工确认、版本控制和迭代优化？
-
-
-
-### 鱼皮系列项目优势
-
-鱼皮的原创项目以 **实战** 为主，用 **全程直播** 的方式 **从 0 到 1** 带做，从需求分析、技术选型、项目设计、项目初始化、Demo 编写、前后端开发实现、项目优化、部署上线等，每个环节我都 **从理论到实践** 给大家讲的明明白白、每个细节都不放过！
-
-比起看网上的教程学习，鱼皮项目系列的优势：从学知识 => 实践项目 => 复习笔记 => 项目答疑 => 简历写法 => 面试题解的一条龙服务
-
-![](https://pic.yupi.icu/1/%E9%B1%BC%E7%9A%AE%E9%A1%B9%E7%9B%AE%E5%AE%9E%E6%88%98%E7%9A%84%E4%BC%98%E5%8A%BF%E5%A4%A7.jpeg)
-
-编程导航已有 **20+ 套项目教程！** 每个项目的学习重点不同，几乎全都是前端 + 后端的 **全栈项目**，也有大量 AI 应用开发项目。
-
-详细请见：[https://codefather.cn/course](https://www.codefather.cn/course)（在该页面右侧有教程推荐和学习建议）
-
-往期项目介绍视频：[https://bilibili.com/video/BV1YvmbYbEgS](https://www.bilibili.com/video/BV1YvmbYbEgS/)
-
-鱼皮的项目帮很多同学拿到了大厂高薪 Offer：
-
-![](https://pic.yupi.icu/1/%E7%BC%96%E7%A8%8B%E5%AF%BC%E8%88%AA2026%20offer%E6%8A%A5%E5%96%9C.png)
-
-
-
-## 三、更多介绍
-
-功能模块：
-
-![](https://pic.yupi.icu/1/image-20260304101313199.png)
-
-架构设计：
-
-![](https://pic.yupi.icu/1/image-20260304101440202.png)
-
-
-
-## 四、快速运行
-
-> 详细的保姆级教程请参考 [本地运行指南](docs/LOCAL_SETUP.md)
-
-### 前置条件
-
-- Node.js ≥ 18（推荐 20 LTS）
-- 一个 [OpenRouter API Key](https://openrouter.ai/settings/keys)（必需，用于 AI 分析）
-
-### 1. 克隆并安装依赖
+前置：Node.js ≥ 18（推荐 20 LTS）、一个 OpenRouter API Key。
 
 ```bash
-git clone https://github.com/liyupi/yupi-hot-monitor.git
-cd yupi-hot-monitor
+# 1. 安装依赖
+cd server && npm install
+cd ../client && npm install
 
-# 后端
+# 2. 配置环境变量
+cp server/.env.example server/.env
+# 编辑 server/.env，至少填入 OPENROUTER_API_KEY
+
+# 3. 初始化数据库
 cd server
-npm install
 npx prisma generate
 npx prisma db push
 
-# 前端
-cd ../client
-npm install
+# 4. 启动（两个终端）
+cd server && npm run dev     # 端口 3001
+cd client && npm run dev     # 端口 5173
 ```
 
-### 2. 配置环境变量
+访问 http://localhost:5173
 
-```bash
-cp server/.env.example server/.env
-```
+**首次体验路径**：
 
-编辑 `server/.env`，至少填入 OpenRouter API Key：
-
-```bash
-OPENROUTER_API_KEY=sk-or-v1-你的key
-# Twitter API Key（可选）
-TWITTER_API_KEY=你的key
-```
-
-### 3. 启动服务（两个终端）
-
-```bash
-# 终端 1：启动后端（端口 3001）
-cd server && npm run dev
-
-# 终端 2：启动前端（端口 5173）
-cd client && npm run dev
-```
-
-访问 **http://localhost:5173** ，输入关键词即可开始监控热点 🔥
+1. 进入「主题词管理」，添加 `理赔时效`
+2. 返回「反馈洞察」，点击「生成演示数据」→ 立刻得到一批已标注反馈
+3. 点击主题词卡片上的「AI 扩展」→ 查看生成的客户口语表达变体，确认启用
+4. 点击「立即分析」→ 观察新一轮反馈流入与实时预警
+5. 进入「评分归因」→ 查看主题分布与 AI 改进建议
+6. 进入「AI 试算」→ 粘贴任意文本，验证单条标注效果
 
 | 服务 | 地址 |
 |------|------|
 | 前端页面 | http://localhost:5173 |
 | 后端 API | http://localhost:3001 |
-| 数据库管理 | `cd server && npx prisma studio`（可选） |
+| 数据库管理 | `cd server && npx prisma studio` |
 
-更多细节请查看 [保姆级本地运行指南](docs/LOCAL_SETUP.md)。
+---
 
+## 六、效果评估
 
+内置标注质量评测集（`server/src/__tests__/aiRelevance.test.ts`），含 12 条覆盖繁中 / 粤语 / 英文 / 混排的用例，每条标注了期望的情感、主题与紧急度。
 
-## 加入项目学习
+```bash
+cd server
+export OPENROUTER_API_KEY=sk-or-v1-xxx
+npm run eval
+```
 
-编程导航已有 **20+ 套项目教程**！每个项目的学习重点不同，几乎全都是前端 + 后端的 **全栈** 项目，也有大量 AI 应用开发项目。
+输出示例：
 
-![](https://pic.yupi.icu/1/%25E9%25A1%25B9%25E7%259B%25AE%25E6%2595%2599%25E7%25A8%258B.png)
+```
+================================================================
+AI 反馈标注准确率报告
+================================================================
+样本数: 12
+情感倾向准确率: 91.7%  (11/12)
+主题归类命中率: 83.3%  (10/12)
+紧急度精确匹配: 75.0%  (9/12)
+紧急度±1容差 : 100.0%  (12/12)
+================================================================
+```
 
-欢迎加入 [编程导航](https://www.codefather.cn/vip)，加入后不仅可以全程跟学本项目，往期 **20+ 套原创项目教程** 也都可以无限回看。还能享受更多原创技术资料、学习和求职指导、上百场面试回放视频，开启你的编程起飞之旅~
+这套评测的意义在于：**Prompt 每次调整都能量化效果**，而不是凭感觉说"好像准了"。更换模型时也可以用同一套集子横向对比。
 
-🧧 助力新项目学习，给大家发放 **限时编程导航优惠券**，扫码即可领券加入。加入三天内不满意可全额退款，欢迎加入体验，名额有限，速来学习！
+排序与兜底逻辑另有一组单元测试（`__tests__/sortFeedbacks.test.ts`），不依赖 API Key：
 
-<img width="404" alt="image" src="https://github.com/user-attachments/assets/56411098-b60e-4267-8ba2-4ebc5d416afc" />
+```bash
+cd server && npm test
+```
 
-1 天不到 1 块钱，绝对是对自己最值的投资！成为编程导航会员后，可以解锁 20 多套项目的教程和资料，PC 网站和 APP 都可以学习，如图：
+---
 
-![](https://pic.yupi.icu/1/image-20250120113756426-20250422160856746.png)
+## 七、数据模型
+
+```
+Topic（主题词）                    Feedback（客户反馈）
+├─ text          主题词            ├─ content      原始文本
+├─ hitCount      命中次数          ├─ source       渠道
+├─ autoGenerated 是否 AI 生成      ├─ rating       客户评分 1-5
+├─ approved      人工确认          ├─ productLine  产品线
+└─ isActive      是否启用          ├─ sentiment    AI 情感
+        │                          ├─ topics       AI 主题(JSON)
+        │ 1 : N                    ├─ urgency      AI 紧急度
+        └──────────────────────────┤─ confidence   置信度
+                                   ├─ isReviewed   是否已复核
+Alert（预警）                      └─ humanLabel   人工修正
+├─ type      negative / surge
+├─ urgency   紧急度
+└─ handled   是否处置
+```
+
+---
+
+## 八、项目结构
+
+```
+├── server/
+│   ├── prisma/schema.prisma        数据模型
+│   └── src/
+│       ├── index.ts                服务入口、定时任务、WebSocket
+│       ├── constants.ts            业务字典（主题/产品/渠道/紧急度）
+│       ├── types.ts                领域类型
+│       ├── jobs/insightRunner.ts   分析主流程 + 突增检测
+│       ├── routes/                 topics / feedbacks / alerts / settings
+│       ├── services/
+│       │   ├── ai.ts               LLM 标注、主题扩展、归因报告
+│       │   ├── feedbackSource.ts   语料生成 + CSV/JSON 导入解析
+│       │   └── email.ts            预警邮件 + 日报
+│       └── utils/sortFeedbacks.ts  排序（前后端共用逻辑）
+├── client/
+│   └── src/
+│       ├── App.tsx                 四个功能页
+│       ├── constants.ts            业务字典（与后端一致）
+│       ├── services/               API 封装 + Socket 客户端
+│       ├── components/
+│       └── utils/sortFeedbacks.ts  前端排序
+├── skills/
+│   └── voc-insight/SKILL.md        Agent Skill，Cursor / Copilot / Claude Code 可直接调用
+└── docs/                           需求文档、运行指南、接入说明
+```
+
+---
+
+## 九、生产落地需要补的部分
+
+当前版本是**可运行的完整原型**，面向真实生产还需补充：
+
+| 事项 | 说明 |
+|------|------|
+| 数据源接入 | `feedbackSource.ts` 中的 `fetchNewFeedback()` 需替换为问卷系统 / 索赔系统的真实接口或定时导出 |
+| 数据合规 | 香港《个人资料（私隐）条例》下，客户原始数据出境前须脱敏，或改用私有化部署模型处理含 PII 的字段 |
+| 权限与多租户 | 当前无鉴权，需按部门隔离数据与预警路由 |
+| 存储 | SQLite 仅适合原型，生产建议 PostgreSQL（并为 `topics` 加索引或改用关联表以支持精确查询） |
+| 限流与重试 | LLM 调用需加重试与并发控制，避免批量导入时限流失败 |
+
+---
+
+## 十、已知限制
+
+- `topics` 以 JSON 字符串存储，主题筛选走 `contains` 匹配，大数据量下应改为关联表
+- 演示语料为构造数据，用于验证链路与 Prompt 效果，不反映任何真实客户意见
+- AI 生成的归因与建议仅供参考，不构成业务或合规结论

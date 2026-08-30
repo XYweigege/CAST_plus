@@ -1,1122 +1,740 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
-import { 
-  Flame, Search, Plus, Bell, Trash2, 
-  ExternalLink, RefreshCw, X, Check, AlertTriangle,
-  Zap, TrendingUp, Twitter, Globe, Eye, Activity, Clock, Target,
-  ChevronLeft, ChevronRight,
-  MessageCircle, Repeat2, Quote, User, Shield, ShieldAlert,
-  ChevronDown, ChevronUp, ChevronsUpDown, ThermometerSun, FileText
+import {
+  AlertTriangle, Bell, Check, Trash2, RefreshCw, Sparkles,
+  Star, Target, MessageSquare, TrendingDown, X, Plus
 } from 'lucide-react';
-import { 
-  keywordsApi, hotspotsApi, notificationsApi, triggerHotspotCheck,
-  type Keyword, type Hotspot, type Stats, type Notification
+import {
+  topicsApi, feedbacksApi, alertsApi, triggerInsightCheck,
+  type Topic, type Feedback, type Stats, type Alert,
+  type AnalysisResult, type InsightReport, type FeedbackQuery
 } from './services/api';
-import { onNewHotspot, onNotification, subscribeToKeywords } from './services/socket';
+import { onNewFeedback, onAlert, subscribeToTopics } from './services/socket';
 import { cn } from './lib/utils';
-import { Spotlight } from './components/ui/spotlight';
-import { BackgroundBeams } from './components/ui/background-beams';
-import { Meteors } from './components/ui/meteors';
+import Layout, { type TabKey } from './components/Layout';
+import FeedbackTable from './components/FeedbackTable';
 import FilterSortBar, { defaultFilterState, type FilterState } from './components/FilterSortBar';
-import { sortHotspots } from './utils/sortHotspots';
-import { relativeTime, formatDateTime } from './utils/relativeTime';
-// TextGenerateEffect available for future use
-
-/** 计算热度综合指标（归一化 0-100） */
-function calcHeatScore(h: Hotspot): number {
-  const likes = h.likeCount ?? 0;
-  const retweets = h.retweetCount ?? 0;
-  const replies = h.replyCount ?? 0;
-  const comments = h.commentCount ?? 0;
-  const quotes = h.quoteCount ?? 0;
-  const views = h.viewCount ?? 0;
-  // 加权公式：转发最重、其次点赞、然后评论/回复
-  const raw = likes * 2 + retweets * 3 + replies * 1.5 + comments * 1.5 + quotes * 2 + views / 100;
-  // log 压缩到 0-100
-  if (raw <= 0) return 0;
-  return Math.min(100, Math.round(Math.log10(raw + 1) * 25));
-}
-
-function getHeatLevel(score: number): { label: string; color: string } {
-  if (score >= 80) return { label: '爆', color: 'text-red-400' };
-  if (score >= 60) return { label: '热', color: 'text-orange-400' };
-  if (score >= 40) return { label: '温', color: 'text-amber-400' };
-  if (score >= 20) return { label: '凉', color: 'text-blue-400' };
-  return { label: '冷', color: 'text-slate-500' };
-}
+import { PRODUCT_LINES } from './constants';
 
 function App() {
-  const [keywords, setKeywords] = useState<Keyword[]>([]);
-  const [hotspots, setHotspots] = useState<Hotspot[]>([]);
+  const [activeTab, setActiveTab] = useState<TabKey>('feedbacks');
+
+  const [topics, setTopics] = useState<Topic[]>([]);
+  const [feedbacks, setFeedbacks] = useState<Feedback[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
-  const [notifications, setNotifications] = useState<Notification[]>([]);
+  const [alerts, setAlerts] = useState<Alert[]>([]);
   const [unreadCount, setUnreadCount] = useState(0);
-  
-  const [newKeyword, setNewKeyword] = useState('');
-  const [searchQuery, setSearchQuery] = useState('');
-  const [isLoading, setIsLoading] = useState(false);
-  const [isChecking, setIsChecking] = useState(false);
-  const [showNotifications, setShowNotifications] = useState(false);
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'keywords' | 'search'>('dashboard');
-  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
-  const [dashboardFilters, setDashboardFilters] = useState<FilterState>({ ...defaultFilterState });
-  const [searchFilters, setSearchFilters] = useState<FilterState>({ ...defaultFilterState });
+
+  const [filters, setFilters] = useState<FilterState>({ ...defaultFilterState });
   const [currentPage, setCurrentPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
-  const [searchResults, setSearchResults] = useState<Hotspot[]>([]);
-  // 展开/折叠状态
-  const [expandedReasons, setExpandedReasons] = useState<Set<string>>(new Set());
-  const [expandedContents, setExpandedContents] = useState<Set<string>>(new Set());
-  const [allReasonsExpanded, setAllReasonsExpanded] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [isChecking, setIsChecking] = useState(false);
+  const [showAlerts, setShowAlerts] = useState(false);
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
 
-  // 加载数据
-  const loadData = useCallback(async () => {
-    setIsLoading(true);
-    try {
-      const filterParams: Record<string, string | number> = {
-        limit: 20,
-        page: currentPage,
-      };
-      // Apply dashboard filters
-      if (dashboardFilters.source) filterParams.source = dashboardFilters.source;
-      if (dashboardFilters.importance) filterParams.importance = dashboardFilters.importance;
-      if (dashboardFilters.keywordId) filterParams.keywordId = dashboardFilters.keywordId;
-      if (dashboardFilters.timeRange) filterParams.timeRange = dashboardFilters.timeRange;
-      if (dashboardFilters.isReal) filterParams.isReal = dashboardFilters.isReal;
-      if (dashboardFilters.sortBy) filterParams.sortBy = dashboardFilters.sortBy;
-      if (dashboardFilters.sortOrder) filterParams.sortOrder = dashboardFilters.sortOrder;
+  // 主题词
+  const [newTopic, setNewTopic] = useState('');
+  const [expandingId, setExpandingId] = useState<string | null>(null);
 
-      const [keywordsData, hotspotsData, statsData, notifData] = await Promise.all([
-        keywordsApi.getAll(),
-        hotspotsApi.getAll(filterParams as any),
-        hotspotsApi.getStats(),
-        notificationsApi.getAll({ limit: 20 })
-      ]);
-      setKeywords(keywordsData);
-      setHotspots(hotspotsData.data);
-      setTotalPages(hotspotsData.pagination.totalPages);
-      setStats(statsData);
-      setNotifications(notifData.data);
-      setUnreadCount(notifData.unreadCount);
+  // 归因报告
+  const [insightProduct, setInsightProduct] = useState('');
+  const [insight, setInsight] = useState<InsightReport | null>(null);
+  const [insightLoading, setInsightLoading] = useState(false);
 
-      // 订阅关键词
-      const activeKeywords = keywordsData.filter(k => k.isActive).map(k => k.text);
-      if (activeKeywords.length > 0) {
-        subscribeToKeywords(activeKeywords);
-      }
-    } catch (error) {
-      console.error('Failed to load data:', error);
-    } finally {
-      setIsLoading(false);
-    }
-  }, [dashboardFilters, currentPage]);
-
-  // 当筛选条件变化时重置页码
-  useEffect(() => {
-    setCurrentPage(1);
-  }, [dashboardFilters]);
-
-  useEffect(() => {
-    loadData();
-  }, [loadData]);
-
-  // WebSocket 事件
-  useEffect(() => {
-    const unsubHotspot = onNewHotspot((hotspot) => {
-      setHotspots(prev => [hotspot as Hotspot, ...prev.slice(0, 19)]);
-      showToast('发现新热点: ' + hotspot.title.slice(0, 30), 'success');
-      loadData();
-    });
-
-    const unsubNotif = onNotification(() => {
-      setUnreadCount(prev => prev + 1);
-    });
-
-    return () => {
-      unsubHotspot();
-      unsubNotif();
-    };
-  }, [loadData]);
+  // AI 试算
+  const [tryText, setTryText] = useState('');
+  const [tryProduct, setTryProduct] = useState('');
+  const [tryResult, setTryResult] = useState<AnalysisResult | null>(null);
+  const [tryLoading, setTryLoading] = useState(false);
 
   const showToast = (message: string, type: 'success' | 'error') => {
     setToast({ message, type });
     setTimeout(() => setToast(null), 3000);
   };
 
-  // 添加关键词
-  const handleAddKeyword = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newKeyword.trim()) return;
-
+  // ===== 数据加载 =====
+  const loadData = useCallback(async () => {
+    setIsLoading(true);
     try {
-      const keyword = await keywordsApi.create({ text: newKeyword.trim() });
-      setKeywords(prev => [keyword, ...prev]);
-      setNewKeyword('');
-      showToast('关键词添加成功', 'success');
-      subscribeToKeywords([keyword.text]);
+      const params: Record<string, string | number> = { limit: 20, page: currentPage };
+      if (filters.keyword) params.keyword = filters.keyword;
+      if (filters.source) params.source = filters.source;
+      if (filters.sentiment) params.sentiment = filters.sentiment;
+      if (filters.urgency) params.urgency = filters.urgency;
+      if (filters.productLine) params.productLine = filters.productLine;
+      if (filters.topicId) params.topicId = filters.topicId;
+      if (filters.timeRange) params.timeRange = filters.timeRange;
+      if (filters.pendingReview) params.pendingReview = filters.pendingReview;
+      if (filters.sortBy) params.sortBy = filters.sortBy;
+      if (filters.sortOrder) params.sortOrder = filters.sortOrder;
+
+      const [topicsData, feedbacksData, statsData, alertData] = await Promise.all([
+        topicsApi.getAll(),
+        feedbacksApi.getAll(params as unknown as FeedbackQuery),
+        feedbacksApi.getStats(),
+        alertsApi.getAll({ limit: 20 })
+      ]);
+
+      setTopics(topicsData);
+      setFeedbacks(feedbacksData.data);
+      setTotalPages(feedbacksData.pagination.totalPages);
+      setStats(statsData);
+      setAlerts(alertData.data);
+      setUnreadCount(alertData.unreadCount);
+
+      const active = topicsData.filter(t => t.isActive).map(t => t.text);
+      if (active.length > 0) subscribeToTopics(active);
+    } catch (error) {
+      console.error('Failed to load data:', error);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [filters, currentPage]);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [filters]);
+
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
+
+  useEffect(() => {
+    const unsubFeedback = onNewFeedback(() => {
+      showToast('新增客户反馈', 'success');
+      loadData();
+    });
+    const unsubAlert = onAlert((al) => {
+      setUnreadCount(prev => prev + 1);
+      showToast('新预警: ' + al.title, 'error');
+      loadData();
+    });
+    return () => {
+      unsubFeedback();
+      unsubAlert();
+    };
+  }, [loadData]);
+
+  // ===== 主题词 =====
+  const handleAddTopic = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newTopic.trim()) return;
+    try {
+      const topic = await topicsApi.create({ text: newTopic.trim() });
+      setTopics(prev => [topic, ...prev]);
+      setNewTopic('');
+      showToast('主题词已添加', 'success');
     } catch (error: any) {
       showToast(error.message || '添加失败', 'error');
     }
   };
 
-  // 删除关键词
-  const handleDeleteKeyword = async (id: string) => {
+  const handleDeleteTopic = async (id: string) => {
     try {
-      await keywordsApi.delete(id);
-      setKeywords(prev => prev.filter(k => k.id !== id));
-      showToast('关键词已删除', 'success');
-    } catch (error) {
+      await topicsApi.delete(id);
+      setTopics(prev => prev.filter(t => t.id !== id));
+      showToast('已删除', 'success');
+    } catch {
       showToast('删除失败', 'error');
     }
   };
 
-  // 切换关键词状态
-  const handleToggleKeyword = async (id: string) => {
+  const handleToggleTopic = async (id: string) => {
     try {
-      const updated = await keywordsApi.toggle(id);
-      setKeywords(prev => prev.map(k => k.id === id ? updated : k));
-    } catch (error) {
+      const updated = await topicsApi.toggle(id);
+      setTopics(prev => prev.map(t => (t.id === id ? updated : t)));
+    } catch {
       showToast('操作失败', 'error');
     }
   };
 
-  // 手动搜索
-  const handleSearch = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!searchQuery.trim()) return;
-
-    setIsLoading(true);
+  const handleExpandTopic = async (id: string) => {
+    setExpandingId(id);
     try {
-      const result = await hotspotsApi.search(searchQuery);
-      setSearchResults(result.results);
-      showToast(`找到 ${result.results.length} 条结果`, 'success');
-    } catch (error) {
-      showToast('搜索失败', 'error');
+      const { created } = await topicsApi.expand(id);
+      setTopics(await topicsApi.getAll());
+      showToast(`已生成 ${created.length} 个候选变体，待确认`, 'success');
+    } catch {
+      showToast('扩展失败', 'error');
     } finally {
-      setIsLoading(false);
+      setExpandingId(null);
     }
   };
 
-  // 手动触发检查
+  const handleApproveTopic = async (id: string, approved: boolean) => {
+    try {
+      await topicsApi.approve(id, approved);
+      setTopics(await topicsApi.getAll());
+    } catch {
+      showToast('操作失败', 'error');
+    }
+  };
+
+  // ===== 预警 =====
+  const handleMarkAllRead = async () => {
+    try {
+      await alertsApi.markAllAsRead();
+      setUnreadCount(0);
+      setAlerts(prev => prev.map(a => ({ ...a, isRead: true })));
+    } catch {
+      console.error('Failed to mark as read');
+    }
+  };
+
+  const handleAlert = async (id: string) => {
+    try {
+      await alertsApi.handle(id);
+      setAlerts(prev => prev.map(a => (a.id === id ? { ...a, handled: true, isRead: true } : a)));
+      showToast('已标记处置', 'success');
+    } catch {
+      showToast('操作失败', 'error');
+    }
+  };
+
+  // ===== 触发 =====
   const handleManualCheck = async () => {
     setIsChecking(true);
     try {
-      await triggerHotspotCheck();
-      showToast('热点检查已触发', 'success');
-      setTimeout(loadData, 5000);
-    } catch (error) {
+      await triggerInsightCheck();
+      showToast('分析任务已触发', 'success');
+      setTimeout(loadData, 4000);
+    } catch {
       showToast('触发失败', 'error');
     } finally {
       setIsChecking(false);
     }
   };
 
-  // 标记通知为已读
-  const handleMarkAllRead = async () => {
+  const handleGenerateDemo = async () => {
+    setIsChecking(true);
     try {
-      await notificationsApi.markAllAsRead();
-      setUnreadCount(0);
-      setNotifications(prev => prev.map(n => ({ ...n, isRead: true })));
-    } catch (error) {
-      console.error('Failed to mark as read:', error);
+      const res = await feedbacksApi.generateDemo(60);
+      showToast(`已生成 ${res.created} 条反馈`, 'success');
+      loadData();
+    } catch {
+      showToast('生成失败', 'error');
+    } finally {
+      setIsChecking(false);
     }
   };
 
-  // 展开/折叠相关性理由
-  const toggleReason = (id: string) => {
-    setExpandedReasons(prev => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
-      return next;
-    });
-  };
-
-  // 展开/折叠原始内容
-  const toggleContent = (id: string) => {
-    setExpandedContents(prev => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
-      return next;
-    });
-  };
-
-  // 一键展开/折叠所有相关性理由
-  const toggleAllReasons = (list: Hotspot[]) => {
-    if (allReasonsExpanded) {
-      setExpandedReasons(new Set());
-    } else {
-      setExpandedReasons(new Set(list.filter(h => h.relevanceReason).map(h => h.id)));
-    }
-    setAllReasonsExpanded(!allReasonsExpanded);
-  };
-
-  // Client-side filtering/sorting for search results
-  const filteredSearchResults = useMemo(() => {
-    let results = [...searchResults];
-
-    // Apply filters
-    if (searchFilters.source) {
-      results = results.filter(h => h.source === searchFilters.source);
-    }
-    if (searchFilters.importance) {
-      results = results.filter(h => h.importance === searchFilters.importance);
-    }
-    if (searchFilters.isReal === 'true') {
-      results = results.filter(h => h.isReal);
-    } else if (searchFilters.isReal === 'false') {
-      results = results.filter(h => !h.isReal);
-    }
-    if (searchFilters.keywordId) {
-      results = results.filter(h => h.keyword?.id === searchFilters.keywordId);
-    }
-    if (searchFilters.timeRange) {
-      const now = new Date();
-      let dateFrom: Date | null = null;
-      switch (searchFilters.timeRange) {
-        case '1h': dateFrom = new Date(now.getTime() - 60 * 60 * 1000); break;
-        case 'today': dateFrom = new Date(now); dateFrom.setHours(0, 0, 0, 0); break;
-        case '7d': dateFrom = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000); break;
-        case '30d': dateFrom = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000); break;
-      }
-      if (dateFrom) {
-        results = results.filter(h => new Date(h.createdAt) >= dateFrom!);
-      }
-    }
-
-    // Apply sorting using shared utility
-    results = sortHotspots(results, searchFilters.sortBy || 'createdAt', (searchFilters.sortOrder || 'desc') as 'asc' | 'desc');
-
-    return results;
-  }, [searchResults, searchFilters]);
-
-  const getImportanceIcon = (importance: string) => {
-    switch (importance) {
-      case 'urgent': return <AlertTriangle className="w-4 h-4" />;
-      case 'high': return <Flame className="w-4 h-4" />;
-      case 'medium': return <Zap className="w-4 h-4" />;
-      default: return <TrendingUp className="w-4 h-4" />;
+  const handleReview = async (id: string, sentiment: string) => {
+    try {
+      await feedbacksApi.review(id, { sentiment });
+      setFeedbacks(prev => prev.map(f => (f.id === id ? { ...f, sentiment, isReviewed: true } : f)));
+      showToast('已提交人工复核', 'success');
+    } catch {
+      showToast('复核失败', 'error');
     }
   };
 
-  const getSourceIcon = (source: string) => {
-    switch (source) {
-      case 'twitter': return <Twitter className="w-4 h-4" />;
-      case 'bilibili': return <Eye className="w-4 h-4" />;
-      case 'weibo': return <Activity className="w-4 h-4" />;
-      case 'sogou': return <Search className="w-4 h-4" />;
-      case 'hackernews': return <Zap className="w-4 h-4" />;
-      default: return <Globe className="w-4 h-4" />;
+  // ===== 归因报告 =====
+  const loadInsight = useCallback(async () => {
+    setInsightLoading(true);
+    try {
+      setInsight(await feedbacksApi.getInsight(insightProduct || undefined));
+    } catch {
+      showToast('报告生成失败', 'error');
+    } finally {
+      setInsightLoading(false);
+    }
+  }, [insightProduct]);
+
+  useEffect(() => {
+    if (activeTab === 'insight') loadInsight();
+  }, [activeTab, loadInsight]);
+
+  // ===== AI 试算 =====
+  const handleTry = async () => {
+    if (!tryText.trim()) return;
+    setTryLoading(true);
+    try {
+      setTryResult(await feedbacksApi.analyze({
+        content: tryText.trim(),
+        productLine: tryProduct || undefined
+      }));
+    } catch {
+      showToast('分析失败', 'error');
+    } finally {
+      setTryLoading(false);
     }
   };
 
-  const getSourceLabel = (source: string) => {
-    const labels: Record<string, string> = {
-      twitter: 'Twitter',
-      bing: 'Bing',
-      google: 'Google',
-      sogou: '搜狗',
-      bilibili: 'Bilibili',
-      weibo: '微博热搜',
-      hackernews: 'HackerNews',
-      duckduckgo: 'DuckDuckGo'
-    };
-    return labels[source] || source;
-  };
+  const maxTopicCount = useMemo(
+    () => (insight && insight.topTopics.length ? insight.topTopics[0].count : 1),
+    [insight]
+  );
+
+  // ===== 顶栏操作 =====
+  const actions = (
+    <>
+      <button
+        onClick={handleGenerateDemo}
+        disabled={isChecking}
+        className="h-8 px-3 rounded-md border border-[#e3e8ef] bg-white text-[13px] font-medium text-slate-600 hover:border-blue-400 hover:text-blue-600 transition-colors disabled:opacity-50"
+      >
+        生成演示数据
+      </button>
+      <button
+        onClick={handleManualCheck}
+        disabled={isChecking}
+        className="h-8 px-3 rounded-md bg-blue-600 text-white text-[13px] font-medium hover:bg-blue-700 inline-flex items-center gap-1.5 transition-colors disabled:opacity-60"
+      >
+        <RefreshCw className={cn("w-3.5 h-3.5", isChecking && "animate-spin")} />
+        {isChecking ? '分析中' : '立即分析'}
+      </button>
+
+      <div className="relative">
+        <button
+          onClick={() => setShowAlerts(!showAlerts)}
+          className="relative w-8 h-8 rounded-md border border-[#e3e8ef] bg-white text-slate-500 hover:border-blue-400 hover:text-blue-600 inline-flex items-center justify-center transition-colors"
+        >
+          <Bell className="w-4 h-4" />
+          {unreadCount > 0 && (
+            <span className="absolute -top-1 -right-1 min-w-[16px] h-4 px-1 bg-red-500 rounded-full text-[10px] font-bold text-white flex items-center justify-center">
+              {unreadCount > 99 ? '99+' : unreadCount}
+            </span>
+          )}
+        </button>
+
+        {showAlerts && (
+          <>
+            <div className="fixed inset-0 z-40" onClick={() => setShowAlerts(false)} />
+            <div className="absolute right-0 top-10 z-50 w-[380px] bg-white rounded-lg border border-[#e3e8ef] shadow-lg overflow-hidden">
+              <div className="flex items-center justify-between px-4 py-3 border-b border-[#eef2f7]">
+                <span className="text-sm font-semibold text-slate-900">预警中心</span>
+                {unreadCount > 0 && (
+                  <button onClick={handleMarkAllRead} className="text-xs text-blue-600 hover:text-blue-700">
+                    全部已读
+                  </button>
+                )}
+              </div>
+              <div className="max-h-[380px] overflow-y-auto">
+                {alerts.length === 0 ? (
+                  <p className="text-sm text-slate-400 text-center py-10">暂无预警</p>
+                ) : (
+                  <div className="divide-y divide-[#eef2f7]">
+                    {alerts.map(a => (
+                      <div key={a.id} className={cn("px-4 py-3", a.isRead && "opacity-60")}>
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <p className="text-[13px] font-medium text-slate-800">{a.title}</p>
+                            <p className="text-xs text-slate-500 mt-0.5 line-clamp-2">{a.content}</p>
+                          </div>
+                          {!a.handled && (
+                            <button
+                              onClick={() => handleAlert(a.id)}
+                              className="shrink-0 h-6 px-2 rounded border border-[#e3e8ef] text-[11px] text-slate-500 hover:border-blue-400 hover:text-blue-600 transition-colors"
+                            >
+                              处置
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+    </>
+  );
 
   return (
-    <div className="min-h-screen bg-[#050510] relative overflow-hidden">
-      {/* Background Effects */}
-      <BackgroundBeams className="z-0" />
-      <Spotlight className="-top-40 left-0 md:left-60 md:-top-20" fill="#3b82f6" />
-      
-      {/* Subtle gradient orbs */}
-      <div className="fixed top-0 right-0 w-[600px] h-[600px] bg-blue-500/5 rounded-full blur-3xl pointer-events-none" />
-      <div className="fixed bottom-0 left-0 w-[400px] h-[400px] bg-cyan-500/5 rounded-full blur-3xl pointer-events-none" />
-
-      {/* Toast */}
-      <AnimatePresence>
-        {toast && (
-          <motion.div
-            initial={{ opacity: 0, y: -20, x: '-50%' }}
-            animate={{ opacity: 1, y: 0, x: '-50%' }}
-            exit={{ opacity: 0, y: -20 }}
-            className={cn(
-              "fixed top-6 left-1/2 z-50 px-5 py-3 rounded-xl backdrop-blur-xl flex items-center gap-3 shadow-2xl",
-              toast.type === 'success' 
-                ? 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-400' 
-                : 'bg-red-500/10 border border-red-500/30 text-red-400'
-            )}
-          >
-            {toast.type === 'success' ? <Check className="w-4 h-4" /> : <X className="w-4 h-4" />}
-            <span className="text-sm font-medium">{toast.message}</span>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      {/* Header - Minimal & Clean */}
-      <header className="sticky top-0 z-40 backdrop-blur-2xl bg-[#050510]/70 border-b border-white/5">
-        <div className="max-w-6xl mx-auto px-6 py-4">
-          <div className="flex items-center justify-between">
-            {/* Logo */}
-            <div className="flex items-center gap-4">
-              <div className="relative">
-                <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-blue-500 to-cyan-400 flex items-center justify-center shadow-lg shadow-blue-500/20">
-                  <Flame className="w-5 h-5 text-white" />
-                </div>
-                <div className="absolute -bottom-1 -right-1 w-3 h-3 bg-emerald-400 rounded-full border-2 border-[#050510] animate-pulse" />
-              </div>
-              <div>
-                <h1 className="text-lg font-semibold text-white tracking-tight">HotPulse</h1>
-                <p className="text-xs text-slate-500">AI 热点雷达</p>
-              </div>
-            </div>
-
-            {/* Actions */}
-            <div className="flex items-center gap-3">
-              <motion.button
-                onClick={handleManualCheck}
-                disabled={isChecking}
-                whileHover={{ scale: 1.02 }}
-                whileTap={{ scale: 0.98 }}
-                className={cn(
-                  "px-4 py-2.5 rounded-xl text-sm font-medium flex items-center gap-2 transition-all",
-                  isChecking 
-                    ? "bg-blue-500/20 text-blue-400 cursor-wait"
-                    : "bg-gradient-to-r from-blue-600 to-cyan-500 text-white shadow-lg shadow-blue-500/25 hover:shadow-blue-500/40"
-                )}
-              >
-                <RefreshCw className={cn("w-4 h-4", isChecking && "animate-spin")} />
-                {isChecking ? '扫描中' : '立即扫描'}
-              </motion.button>
-
-              {/* Notifications */}
-              <div className="relative">
-                <button
-                  onClick={() => setShowNotifications(!showNotifications)}
-                  className="relative p-2.5 rounded-xl bg-white/5 hover:bg-white/10 border border-white/5 transition-all"
-                >
-                  <Bell className="w-5 h-5 text-slate-400" />
-                  {unreadCount > 0 && (
-                    <span className="absolute -top-1 -right-1 w-5 h-5 bg-red-500 rounded-full text-[10px] font-bold flex items-center justify-center text-white">
-                      {unreadCount > 9 ? '9+' : unreadCount}
-                    </span>
-                  )}
-                </button>
-
-                <AnimatePresence>
-                  {showNotifications && (
-                    <motion.div
-                      initial={{ opacity: 0, y: 8, scale: 0.96 }}
-                      animate={{ opacity: 1, y: 0, scale: 1 }}
-                      exit={{ opacity: 0, y: 8, scale: 0.96 }}
-                      className="absolute right-0 top-14 w-80 bg-[#0a0a1a]/95 backdrop-blur-2xl rounded-2xl border border-white/10 shadow-2xl overflow-hidden"
-                    >
-                      <div className="flex items-center justify-between p-4 border-b border-white/5">
-                        <h3 className="font-medium text-white">通知</h3>
-                        {unreadCount > 0 && (
-                          <button onClick={handleMarkAllRead} className="text-xs text-blue-400 hover:text-blue-300">
-                            全部已读
-                          </button>
-                        )}
-                      </div>
-                      <div className="max-h-80 overflow-y-auto">
-                        {notifications.length === 0 ? (
-                          <p className="text-slate-500 text-sm text-center py-8">暂无通知</p>
-                        ) : (
-                          <div className="divide-y divide-white/5">
-                            {notifications.slice(0, 5).map(n => (
-                              <div key={n.id} className={cn("p-4 transition-colors", n.isRead ? 'opacity-50' : 'hover:bg-white/5')}>
-                                <p className="text-sm font-medium text-white">{n.title}</p>
-                                <p className="text-xs text-slate-500 mt-1 line-clamp-2">{n.content}</p>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-              </div>
-            </div>
-          </div>
-        </div>
-      </header>
-
-      {/* Main Content */}
-      <main className="relative z-10 max-w-6xl mx-auto px-6 py-8">
-        {/* Navigation Tabs */}
-        <div className="flex gap-2 mb-8">
-          {([
-            { key: 'dashboard', label: '热点雷达', icon: Activity },
-            { key: 'keywords', label: '监控词', icon: Target },
-            { key: 'search', label: '搜索', icon: Search },
-          ] as const).map(({ key, label, icon: Icon }) => (
-            <button
-              key={key}
-              onClick={() => setActiveTab(key)}
-              className={cn(
-                "px-5 py-2.5 rounded-xl text-sm font-medium flex items-center gap-2 transition-all",
-                activeTab === key 
-                  ? 'bg-white/10 text-white border border-white/10' 
-                  : 'text-slate-500 hover:text-slate-300 hover:bg-white/5'
-              )}
-            >
-              <Icon className="w-4 h-4" />
-              {label}
-            </button>
-          ))}
-        </div>
-
-        {/* Dashboard Tab */}
-        {activeTab === 'dashboard' && (
-          <div className="space-y-8">
-            {/* Hero Stats */}
+    <>
+      <Layout active={activeTab} onNavigate={setActiveTab} actions={actions}>
+        {/* ============ 反馈洞察 ============ */}
+        {activeTab === 'feedbacks' && (
+          <div className="space-y-4">
             {stats && (
               <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-                <motion.div 
-                  initial={{ opacity: 0, y: 20 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  className="relative group p-5 rounded-2xl bg-gradient-to-br from-blue-500/10 to-transparent border border-blue-500/10 overflow-hidden"
-                >
-                  <div className="absolute inset-0 bg-gradient-to-br from-blue-500/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
-                  <div className="relative">
-                    <div className="flex items-center gap-2 text-slate-500 text-sm mb-2">
-                      <Activity className="w-4 h-4" />
-                      总热点
-                    </div>
-                    <p className="text-3xl font-bold text-white">{stats.total}</p>
-                  </div>
-                </motion.div>
-
-                <motion.div 
-                  initial={{ opacity: 0, y: 20 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ delay: 0.05 }}
-                  className="relative group p-5 rounded-2xl bg-gradient-to-br from-cyan-500/10 to-transparent border border-cyan-500/10 overflow-hidden"
-                >
-                  <div className="absolute inset-0 bg-gradient-to-br from-cyan-500/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
-                  <div className="relative">
-                    <div className="flex items-center gap-2 text-slate-500 text-sm mb-2">
-                      <Clock className="w-4 h-4" />
-                      今日新增
-                    </div>
-                    <p className="text-3xl font-bold text-cyan-400">{stats.today}</p>
-                  </div>
-                </motion.div>
-
-                <motion.div 
-                  initial={{ opacity: 0, y: 20 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ delay: 0.1 }}
-                  className="relative group p-5 rounded-2xl bg-gradient-to-br from-red-500/10 to-transparent border border-red-500/10 overflow-hidden"
-                >
-                  <Meteors number={6} />
-                  <div className="relative">
-                    <div className="flex items-center gap-2 text-slate-500 text-sm mb-2">
-                      <AlertTriangle className="w-4 h-4" />
-                      紧急热点
-                    </div>
-                    <p className="text-3xl font-bold text-red-400">{stats.urgent}</p>
-                  </div>
-                </motion.div>
-
-                <motion.div 
-                  initial={{ opacity: 0, y: 20 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ delay: 0.15 }}
-                  className="relative group p-5 rounded-2xl bg-gradient-to-br from-emerald-500/10 to-transparent border border-emerald-500/10 overflow-hidden"
-                >
-                  <div className="absolute inset-0 bg-gradient-to-br from-emerald-500/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
-                  <div className="relative">
-                    <div className="flex items-center gap-2 text-slate-500 text-sm mb-2">
-                      <Target className="w-4 h-4" />
-                      监控词
-                    </div>
-                    <p className="text-3xl font-bold text-emerald-400">{keywords.filter(k => k.isActive).length}</p>
-                  </div>
-                </motion.div>
+                <StatCard icon={MessageSquare} label="反馈总量" value={String(stats.total)} hint={`今日新增 ${stats.today}`} />
+                <StatCard icon={TrendingDown} label="负面占比" value={`${(stats.negativeRatio * 100).toFixed(1)}%`} hint={`${stats.negative} 条负面`} tone="rose" />
+                <StatCard icon={AlertTriangle} label="待处置预警" value={String(stats.pendingAlert)} tone="amber" />
+                <StatCard icon={Star} label="平均评分" value={stats.avgRating != null ? String(stats.avgRating) : '—'} hint={`${stats.pendingReview} 条待复核`} tone="emerald" />
               </div>
             )}
 
-            {/* Hotspots Feed */}
-            <div>
-              <div className="flex items-center justify-between mb-4">
-                <h2 className="text-lg font-semibold text-white flex items-center gap-2">
-                  <Flame className="w-5 h-5 text-orange-500" />
-                  实时热点流
-                </h2>
-                <span className="text-xs text-slate-600">每 30 分钟自动更新</span>
-              </div>
+            <FilterSortBar filters={filters} onChange={setFilters} topics={topics} />
 
-              {/* Filter & Sort Bar */}
-              <div className="mb-5">
-                <FilterSortBar
-                  filters={dashboardFilters}
-                  onChange={setDashboardFilters}
-                  keywords={keywords}
-                />
-              </div>
-              
-              {isLoading ? (
-                <div className="flex items-center justify-center py-16">
-                  <div className="w-8 h-8 border-2 border-blue-500/30 border-t-blue-500 rounded-full animate-spin" />
-                </div>
-              ) : hotspots.length === 0 ? (
-                <div className="text-center py-16 rounded-2xl border border-dashed border-white/10">
-                  <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-white/5 flex items-center justify-center">
-                    <Search className="w-8 h-8 text-slate-600" />
-                  </div>
-                  <p className="text-slate-500">尚未发现热点</p>
-                  <p className="text-sm text-slate-600 mt-1">添加监控关键词开始追踪</p>
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  {/* 一键展开/折叠所有理由 */}
-                  {hotspots.some(h => h.relevanceReason) && (
-                    <div className="flex justify-end">
-                      <button
-                        onClick={() => toggleAllReasons(hotspots)}
-                        className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-blue-400 transition-colors px-3 py-1.5 rounded-lg hover:bg-white/5"
-                      >
-                        <ChevronsUpDown className="w-3.5 h-3.5" />
-                        {allReasonsExpanded ? '折叠所有理由' : '展开所有理由'}
-                      </button>
-                    </div>
-                  )}
-
-                  {hotspots.map((hotspot, index) => {
-                    const heatScore = calcHeatScore(hotspot);
-                    const heat = getHeatLevel(heatScore);
-                    return (
-                    <motion.div
-                      key={hotspot.id}
-                      initial={{ opacity: 0, x: -10 }}
-                      animate={{ opacity: 1, x: 0 }}
-                      transition={{ delay: index * 0.03 }}
-                      className="group p-5 rounded-2xl bg-white/[0.02] hover:bg-white/[0.04] border border-white/5 hover:border-white/10 transition-all"
-                    >
-                      <div className="flex items-start justify-between gap-4">
-                        <div className="flex-1 min-w-0">
-                          {/* Row 1: Meta badges */}
-                          <div className="flex flex-wrap items-center gap-2 mb-3">
-                            <span className={cn(
-                              "px-2.5 py-1 rounded-lg text-[10px] font-semibold uppercase tracking-wider flex items-center",
-                              hotspot.importance === 'urgent' && "bg-red-500/15 text-red-400 border border-red-500/20",
-                              hotspot.importance === 'high' && "bg-orange-500/15 text-orange-400 border border-orange-500/20",
-                              hotspot.importance === 'medium' && "bg-amber-500/15 text-amber-400 border border-amber-500/20",
-                              hotspot.importance === 'low' && "bg-emerald-500/15 text-emerald-400 border border-emerald-500/20"
-                            )}>
-                              {getImportanceIcon(hotspot.importance)}
-                              <span className="ml-1">{hotspot.importance}</span>
-                            </span>
-                            <span className="flex items-center gap-1 text-xs text-slate-600">
-                              {getSourceIcon(hotspot.source)}
-                              {getSourceLabel(hotspot.source)}
-                            </span>
-                            {hotspot.keyword && (
-                              <span className="text-[10px] px-2 py-0.5 rounded-md bg-blue-500/10 text-blue-400 border border-blue-500/20">
-                                {hotspot.keyword.text}
-                              </span>
-                            )}
-                            {/* 真实性标记 */}
-                            {!hotspot.isReal && (
-                              <span className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-md bg-red-500/10 text-red-400 border border-red-500/20">
-                                <ShieldAlert className="w-3 h-3" />
-                                可疑
-                              </span>
-                            )}
-                            {hotspot.isReal && hotspot.relevance >= 80 && (
-                              <span className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-md bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                                <Shield className="w-3 h-3" />
-                                可信
-                              </span>
-                            )}
-                            {hotspot.keywordMentioned === true && (
-                              <span className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-md bg-purple-500/10 text-purple-400 border border-purple-500/20">
-                                <Target className="w-3 h-3" />
-                                直接提及
-                              </span>
-                            )}
-                            {hotspot.keywordMentioned === false && (
-                              <span className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-md bg-yellow-500/10 text-yellow-500 border border-yellow-500/20">
-                                <Target className="w-3 h-3" />
-                                间接相关
-                              </span>
-                            )}
-                            {/* 热度综合指标 */}
-                            <span className={cn("flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-md bg-white/5 border border-white/10 font-medium", heat.color)}>
-                              <ThermometerSun className="w-3 h-3" />
-                              {heat.label} {heatScore}
-                            </span>
-                          </div>
-                          
-                          {/* Title */}
-                          <h3 className="font-medium text-white mb-2 line-clamp-2 group-hover:text-blue-400 transition-colors">
-                            {hotspot.title}
-                          </h3>
-                          
-                          {/* AI Summary - 标注 */}
-                          {hotspot.summary && (
-                            <div className="mb-3">
-                              <span className="text-[10px] text-blue-400/60 font-medium mr-1.5">AI 摘要</span>
-                              <span className="text-sm text-slate-500">{hotspot.summary}</span>
-                            </div>
-                          )}
-
-                          {/* 作者信息 */}
-                          {hotspot.authorName && (
-                            <div className="flex items-center gap-2 mb-3">
-                              {hotspot.authorAvatar ? (
-                                <img src={hotspot.authorAvatar} alt="" className="w-5 h-5 rounded-full object-cover" />
-                              ) : (
-                                <User className="w-4 h-4 text-slate-600" />
-                              )}
-                              <span className="text-xs text-slate-400">
-                                {hotspot.authorName}
-                                {hotspot.authorUsername && <span className="text-slate-600 ml-1">@{hotspot.authorUsername}</span>}
-                              </span>
-                              {hotspot.authorVerified && (
-                                <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-400">✓ 认证</span>
-                              )}
-                              {hotspot.authorFollowers != null && hotspot.authorFollowers > 0 && (
-                                <span className="text-[10px] text-slate-600">{hotspot.authorFollowers.toLocaleString()} 粉丝</span>
-                              )}
-                            </div>
-                          )}
-                          
-                          {/* 互动数据 */}
-                          <div className="flex flex-wrap items-center gap-3 text-xs text-slate-600 mb-2">
-                            <span className="flex items-center gap-1">
-                              <Target className="w-3.5 h-3.5" />
-                              相关性 {hotspot.relevance}%
-                            </span>
-                            {hotspot.likeCount != null && hotspot.likeCount > 0 && (
-                              <span className="flex items-center gap-1" title="点赞">
-                                <Zap className="w-3.5 h-3.5" />
-                                {hotspot.likeCount.toLocaleString()}
-                              </span>
-                            )}
-                            {hotspot.retweetCount != null && hotspot.retweetCount > 0 && (
-                              <span className="flex items-center gap-1" title="转发">
-                                <Repeat2 className="w-3.5 h-3.5" />
-                                {hotspot.retweetCount.toLocaleString()}
-                              </span>
-                            )}
-                            {hotspot.replyCount != null && hotspot.replyCount > 0 && (
-                              <span className="flex items-center gap-1" title="回复">
-                                <MessageCircle className="w-3.5 h-3.5" />
-                                {hotspot.replyCount.toLocaleString()}
-                              </span>
-                            )}
-                            {hotspot.commentCount != null && hotspot.commentCount > 0 && (
-                              <span className="flex items-center gap-1" title="评论">
-                                <MessageCircle className="w-3.5 h-3.5" />
-                                {hotspot.commentCount.toLocaleString()}
-                              </span>
-                            )}
-                            {hotspot.quoteCount != null && hotspot.quoteCount > 0 && (
-                              <span className="flex items-center gap-1" title="引用">
-                                <Quote className="w-3.5 h-3.5" />
-                                {hotspot.quoteCount.toLocaleString()}
-                              </span>
-                            )}
-                            {hotspot.viewCount != null && hotspot.viewCount > 0 && (
-                              <span className="flex items-center gap-1" title="浏览量">
-                                <Eye className="w-3.5 h-3.5" />
-                                {hotspot.viewCount.toLocaleString()}
-                              </span>
-                            )}
-                            {hotspot.danmakuCount != null && hotspot.danmakuCount > 0 && (
-                              <span className="flex items-center gap-1" title="弹幕">
-                                💬 {hotspot.danmakuCount.toLocaleString()}
-                              </span>
-                            )}
-                          </div>
-
-                          {/* 时间信息 */}
-                          <div className="flex flex-wrap items-center gap-3 text-[11px] text-slate-600">
-                            {hotspot.publishedAt && (
-                              <span className="flex items-center gap-1" title={`发布于 ${formatDateTime(hotspot.publishedAt)}`}>
-                                <Clock className="w-3 h-3" />
-                                发布 {relativeTime(hotspot.publishedAt)}
-                              </span>
-                            )}
-                            <span className="flex items-center gap-1" title={`抓取于 ${formatDateTime(hotspot.createdAt)}`}>
-                              <Activity className="w-3 h-3" />
-                              抓取 {relativeTime(hotspot.createdAt)}
-                            </span>
-                          </div>
-
-                          {/* AI 相关性理由 - 可折叠 */}
-                          {hotspot.relevanceReason && (
-                            <div className="mt-2">
-                              <button
-                                onClick={() => toggleReason(hotspot.id)}
-                                className="flex items-center gap-1 text-[11px] text-blue-400/70 hover:text-blue-400 transition-colors"
-                              >
-                                {expandedReasons.has(hotspot.id) ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-                                AI 分析理由
-                              </button>
-                              <AnimatePresence>
-                                {expandedReasons.has(hotspot.id) && (
-                                  <motion.div
-                                    initial={{ height: 0, opacity: 0 }}
-                                    animate={{ height: 'auto', opacity: 1 }}
-                                    exit={{ height: 0, opacity: 0 }}
-                                    className="overflow-hidden"
-                                  >
-                                    <p className="text-xs text-slate-500 mt-1 pl-4 border-l-2 border-blue-500/20">
-                                      {hotspot.relevanceReason}
-                                    </p>
-                                  </motion.div>
-                                )}
-                              </AnimatePresence>
-                            </div>
-                          )}
-
-                          {/* 原始内容 - 可折叠 */}
-                          {hotspot.content && hotspot.content !== hotspot.summary && (
-                            <div className="mt-2">
-                              <button
-                                onClick={() => toggleContent(hotspot.id)}
-                                className="flex items-center gap-1 text-[11px] text-slate-500 hover:text-slate-300 transition-colors"
-                              >
-                                {expandedContents.has(hotspot.id) ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-                                <FileText className="w-3 h-3" />
-                                原始内容
-                              </button>
-                              <AnimatePresence>
-                                {expandedContents.has(hotspot.id) && (
-                                  <motion.div
-                                    initial={{ height: 0, opacity: 0 }}
-                                    animate={{ height: 'auto', opacity: 1 }}
-                                    exit={{ height: 0, opacity: 0 }}
-                                    className="overflow-hidden"
-                                  >
-                                    <p className="text-xs text-slate-500 mt-1 pl-4 border-l-2 border-white/10 whitespace-pre-wrap break-words max-h-40 overflow-y-auto">
-                                      {hotspot.content}
-                                    </p>
-                                  </motion.div>
-                                )}
-                              </AnimatePresence>
-                            </div>
-                          )}
-                        </div>
-                        
-                        {/* Link */}
-                        <a
-                          href={hotspot.url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          onClick={(e) => e.stopPropagation()}
-                          className="p-2.5 rounded-xl bg-white/5 hover:bg-blue-500/20 text-slate-500 hover:text-blue-400 transition-all opacity-0 group-hover:opacity-100"
-                        >
-                          <ExternalLink className="w-4 h-4" />
-                        </a>
-                      </div>
-                    </motion.div>
-                    );
-                  })}
-                </div>
-              )}
-
-              {/* Pagination */}
-              {totalPages > 1 && !isLoading && (
-                <div className="flex items-center justify-center gap-3 mt-6">
-                  <button
-                    onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
-                    disabled={currentPage <= 1}
-                    className="p-2 rounded-xl bg-white/5 border border-white/10 text-slate-400 hover:text-white hover:border-white/20 transition-all disabled:opacity-30 disabled:cursor-not-allowed"
-                  >
-                    <ChevronLeft className="w-4 h-4" />
-                  </button>
-                  <div className="flex items-center gap-1.5">
-                    {Array.from({ length: Math.min(totalPages, 7) }, (_, i) => {
-                      let page: number;
-                      if (totalPages <= 7) {
-                        page = i + 1;
-                      } else if (currentPage <= 4) {
-                        page = i + 1;
-                      } else if (currentPage >= totalPages - 3) {
-                        page = totalPages - 6 + i;
-                      } else {
-                        page = currentPage - 3 + i;
-                      }
-                      return (
-                        <button
-                          key={page}
-                          onClick={() => setCurrentPage(page)}
-                          className={cn(
-                            "w-8 h-8 rounded-lg text-xs font-medium transition-all",
-                            currentPage === page
-                              ? "bg-blue-500/20 text-blue-400 border border-blue-500/30"
-                              : "text-slate-500 hover:text-white hover:bg-white/5"
-                          )}
-                        >
-                          {page}
-                        </button>
-                      );
-                    })}
-                  </div>
-                  <button
-                    onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
-                    disabled={currentPage >= totalPages}
-                    className="p-2 rounded-xl bg-white/5 border border-white/10 text-slate-400 hover:text-white hover:border-white/20 transition-all disabled:opacity-30 disabled:cursor-not-allowed"
-                  >
-                    <ChevronRight className="w-4 h-4" />
-                  </button>
-                  <span className="text-xs text-slate-600 ml-2">
-                    共 {stats?.total || 0} 条
-                  </span>
-                </div>
-              )}
-            </div>
+            <FeedbackTable
+              data={feedbacks}
+              loading={isLoading}
+              page={currentPage}
+              totalPages={totalPages}
+              onPageChange={setCurrentPage}
+              onReview={handleReview}
+            />
           </div>
         )}
 
-        {/* Keywords Tab */}
-        {activeTab === 'keywords' && (
-          <div className="space-y-6">
-            {/* Add Keyword Card */}
-            <form onSubmit={handleAddKeyword} className="p-5 rounded-2xl bg-white/[0.02] border border-white/5">
-              <div className="flex gap-3">
-                <div className="flex-1 relative">
-                  <input
-                    type="text"
-                    value={newKeyword}
-                    onChange={(e) => setNewKeyword(e.target.value)}
-                    placeholder="输入要监控的关键词，如：GPT-5、AI编程、Cursor..."
-                    className="w-full px-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white placeholder-slate-600 focus:outline-none focus:border-blue-500/50 focus:ring-2 focus:ring-blue-500/20 transition-all"
-                  />
-                </div>
-                <motion.button 
-                  type="submit" 
-                  whileHover={{ scale: 1.02 }}
-                  whileTap={{ scale: 0.98 }}
-                  className="px-6 py-3 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-500 text-white font-medium flex items-center gap-2 shadow-lg shadow-blue-500/25"
+        {/* ============ 主题词管理 ============ */}
+        {activeTab === 'topics' && (
+          <div className="space-y-4">
+            <div className="bg-white rounded-lg border border-[#e3e8ef] p-4">
+              <form onSubmit={handleAddTopic} className="flex gap-3">
+                <input
+                  value={newTopic}
+                  onChange={(e) => setNewTopic(e.target.value)}
+                  placeholder="输入业务关注的问题主题，如：理赔时效、销售误导、续保与退保"
+                  className="flex-1 h-9 px-3 rounded-md border border-[#e3e8ef] text-sm text-slate-700 placeholder:text-slate-400 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20"
+                />
+                <button
+                  type="submit"
+                  className="h-9 px-4 rounded-md bg-blue-600 text-white text-sm font-medium hover:bg-blue-700 inline-flex items-center gap-1.5 transition-colors"
                 >
                   <Plus className="w-4 h-4" />
-                  添加
-                </motion.button>
-              </div>
-            </form>
-
-            {/* Keywords Grid */}
-            <div className="grid gap-3 md:grid-cols-2">
-              <AnimatePresence>
-                {keywords.map((keyword, i) => (
-                  <motion.div
-                    key={keyword.id}
-                    layout
-                    initial={{ opacity: 0, scale: 0.9 }}
-                    animate={{ opacity: 1, scale: 1 }}
-                    exit={{ opacity: 0, scale: 0.9 }}
-                    transition={{ delay: i * 0.02 }}
-                    className={cn(
-                      "group p-4 rounded-xl border transition-all",
-                      keyword.isActive 
-                        ? "bg-white/[0.03] border-blue-500/20 hover:border-blue-500/30" 
-                        : "bg-white/[0.01] border-white/5 opacity-60"
-                    )}
-                  >
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-3">
-                        {/* Toggle */}
-                        <button
-                          onClick={() => handleToggleKeyword(keyword.id)}
-                          className={cn(
-                            "w-11 h-6 rounded-full transition-all relative",
-                            keyword.isActive ? "bg-blue-500" : "bg-slate-700"
-                          )}
-                        >
-                          <span className={cn(
-                            "absolute top-1 w-4 h-4 bg-white rounded-full shadow transition-all",
-                            keyword.isActive ? "left-6" : "left-1"
-                          )} />
-                        </button>
-                        
-                        <div>
-                          <span className={cn("font-medium", keyword.isActive ? "text-white" : "text-slate-500")}>
-                            {keyword.text}
-                          </span>
-                          {keyword._count && keyword._count.hotspots > 0 && (
-                            <span className="ml-2 text-xs text-slate-600">
-                              {keyword._count.hotspots} 条热点
-                            </span>
-                          )}
-                        </div>
-                      </div>
-                      
-                      <button
-                        onClick={() => handleDeleteKeyword(keyword.id)}
-                        className="p-2 rounded-lg text-slate-600 hover:text-red-400 hover:bg-red-500/10 opacity-0 group-hover:opacity-100 transition-all"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </div>
-                  </motion.div>
-                ))}
-              </AnimatePresence>
+                  添加主题词
+                </button>
+              </form>
+              <p className="text-xs text-slate-500 mt-2.5">
+                主题词是书面业务术语，而客户实际表达往往是口语（如「拖咗好耐都未賠」）。添加后可点击「AI 扩展」生成口语变体，确认后参与匹配。
+              </p>
             </div>
 
-            {keywords.length === 0 && (
-              <div className="text-center py-16 rounded-2xl border border-dashed border-white/10">
-                <div className="w-16 h-16 mx-auto mb-4 rounded-full bg-white/5 flex items-center justify-center">
-                  <Target className="w-8 h-8 text-slate-600" />
-                </div>
-                <p className="text-slate-500">还没有监控关键词</p>
-                <p className="text-sm text-slate-600 mt-1">添加你想追踪的技术热点词</p>
+            <div className="bg-white rounded-lg border border-[#e3e8ef] overflow-hidden">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="bg-[#f8fafc] border-b border-[#e3e8ef]">
+                    <th className="px-4 py-2.5 text-left text-xs font-semibold text-slate-600">主题词</th>
+                    <th className="w-[90px] px-4 py-2.5 text-left text-xs font-semibold text-slate-600">来源</th>
+                    <th className="w-[90px] px-4 py-2.5 text-left text-xs font-semibold text-slate-600">命中次数</th>
+                    <th className="w-[90px] px-4 py-2.5 text-left text-xs font-semibold text-slate-600">状态</th>
+                    <th className="w-[190px] px-4 py-2.5 text-right text-xs font-semibold text-slate-600">操作</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#eef2f7]">
+                  {topics.length === 0 ? (
+                    <tr>
+                      <td colSpan={5} className="px-4 py-16 text-center">
+                        <p className="text-sm text-slate-500">还没有主题词</p>
+                        <p className="text-xs text-slate-400 mt-1">从「理赔时效」这类核心问题开始</p>
+                      </td>
+                    </tr>
+                  ) : (
+                    topics.map(topic => (
+                      <tr key={topic.id} className="hover:bg-[#f8fafc] transition-colors">
+                        <td className="px-4 py-3">
+                          <span className={cn("font-medium", topic.isActive ? "text-slate-900" : "text-slate-400")}>
+                            {topic.text}
+                          </span>
+                          {topic._count && topic._count.feedbacks > 0 && (
+                            <span className="ml-2 text-xs text-slate-400">{topic._count.feedbacks} 条反馈</span>
+                          )}
+                        </td>
+                        <td className="px-4 py-3">
+                          {topic.autoGenerated ? (
+                            <span className="inline-block px-2 py-0.5 rounded bg-purple-50 text-purple-700 text-[11px] border border-purple-200">
+                              AI 生成
+                            </span>
+                          ) : (
+                            <span className="text-xs text-slate-500">人工维护</span>
+                          )}
+                        </td>
+                        <td className="px-4 py-3 text-slate-600">{topic.hitCount}</td>
+                        <td className="px-4 py-3">
+                          {!topic.approved ? (
+                            <span className="inline-block px-2 py-0.5 rounded bg-amber-50 text-amber-700 text-[11px] border border-amber-200">
+                              待确认
+                            </span>
+                          ) : (
+                            <span className={cn(
+                              "inline-block px-2 py-0.5 rounded text-[11px] border",
+                              topic.isActive
+                                ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                                : "bg-slate-50 text-slate-500 border-slate-200"
+                            )}>
+                              {topic.isActive ? '已启用' : '已停用'}
+                            </span>
+                          )}
+                        </td>
+                        <td className="px-4 py-3">
+                          <div className="flex items-center justify-end gap-1.5">
+                            {!topic.approved ? (
+                              <>
+                                <button
+                                  onClick={() => handleApproveTopic(topic.id, true)}
+                                  className="h-7 px-2.5 rounded border border-emerald-200 bg-emerald-50 text-emerald-700 text-xs font-medium hover:bg-emerald-100 transition-colors"
+                                >
+                                  确认
+                                </button>
+                                <button
+                                  onClick={() => handleApproveTopic(topic.id, false)}
+                                  className="h-7 px-2.5 rounded border border-[#e3e8ef] text-xs text-slate-500 hover:bg-slate-50 transition-colors"
+                                >
+                                  否决
+                                </button>
+                              </>
+                            ) : (
+                              <>
+                                <button
+                                  onClick={() => handleExpandTopic(topic.id)}
+                                  disabled={expandingId === topic.id}
+                                  className="h-7 px-2.5 rounded border border-[#e3e8ef] text-xs text-slate-600 hover:border-blue-400 hover:text-blue-600 inline-flex items-center gap-1 transition-colors disabled:opacity-50"
+                                >
+                                  <Sparkles className="w-3 h-3" />
+                                  {expandingId === topic.id ? '扩展中' : 'AI 扩展'}
+                                </button>
+                                <button
+                                  onClick={() => handleToggleTopic(topic.id)}
+                                  className={cn(
+                                    "h-7 px-2.5 rounded border text-xs transition-colors",
+                                    topic.isActive
+                                      ? "border-[#e3e8ef] text-slate-600 hover:bg-slate-50"
+                                      : "border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100"
+                                  )}
+                                >
+                                  {topic.isActive ? '停用' : '启用'}
+                                </button>
+                              </>
+                            )}
+                            <button
+                              onClick={() => handleDeleteTopic(topic.id)}
+                              className="h-7 w-7 rounded border border-[#e3e8ef] text-slate-400 hover:border-red-200 hover:text-red-600 hover:bg-red-50 inline-flex items-center justify-center transition-colors"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* ============ 评分归因 ============ */}
+        {activeTab === 'insight' && (
+          <div className="space-y-4">
+            <div className="bg-white rounded-lg border border-[#e3e8ef] p-4 flex flex-wrap items-center gap-3">
+              <span className="text-sm text-slate-600">产品线</span>
+              <select
+                value={insightProduct}
+                onChange={(e) => setInsightProduct(e.target.value)}
+                className="h-8 pl-2.5 pr-7 rounded-md border border-[#e3e8ef] bg-white text-[13px] text-slate-700 focus:outline-none focus:border-blue-500 appearance-none bg-[url('data:image/svg+xml;charset=utf-8,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2216%22 height=%2216%22 fill=%22none%22 stroke=%22%2394a3b8%22 stroke-width=%222%22%3E%3Cpath d=%22M4 6l4 4 4-4%22/%3E%3C/svg%3E')] bg-no-repeat bg-[right_0.4rem_center] cursor-pointer"
+              >
+                <option value="">全部产品线</option>
+                {PRODUCT_LINES.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
+              </select>
+              <button
+                onClick={loadInsight}
+                disabled={insightLoading}
+                className="h-8 px-3.5 rounded-md bg-blue-600 text-white text-[13px] font-medium hover:bg-blue-700 transition-colors disabled:opacity-60"
+              >
+                {insightLoading ? '生成中…' : '生成报告'}
+              </button>
+            </div>
+
+            {insightLoading ? (
+              <div className="bg-white rounded-lg border border-[#e3e8ef] py-20 flex justify-center">
+                <div className="w-7 h-7 border-2 border-blue-100 border-t-blue-600 rounded-full animate-spin" />
               </div>
+            ) : !insight ? (
+              <div className="bg-white rounded-lg border border-[#e3e8ef] py-20 text-center">
+                <p className="text-sm text-slate-500">选择产品线后生成归因报告</p>
+              </div>
+            ) : (
+              <>
+                <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+                  <StatCard icon={MessageSquare} label="反馈总数" value={String(insight.totalFeedback)} />
+                  <StatCard icon={Star} label="平均评分" value={insight.avgRating != null ? String(insight.avgRating) : '—'} tone="emerald" />
+                  <StatCard icon={TrendingDown} label="负面占比" value={`${(insight.negativeRatio * 100).toFixed(1)}%`} tone="rose" />
+                  <StatCard icon={Target} label="问题主题数" value={String(insight.topTopics.length)} />
+                </div>
+
+                <div className="bg-white rounded-lg border border-[#e3e8ef] p-5">
+                  <h3 className="text-sm font-semibold text-slate-900 mb-4">主题分布</h3>
+                  {insight.topTopics.length === 0 ? (
+                    <p className="text-sm text-slate-400">暂无主题数据（需配置 AI 服务后重新分析）</p>
+                  ) : (
+                    <div className="space-y-3">
+                      {insight.topTopics.slice(0, 8).map(t => (
+                        <div key={t.topic}>
+                          <div className="flex items-center justify-between text-xs mb-1.5">
+                            <span className="text-slate-700 font-medium">{t.topic}</span>
+                            <span className="text-slate-400">{t.count} 条 · 负面 {t.negativeCount}</span>
+                          </div>
+                          <div className="h-2 rounded-full bg-slate-100 overflow-hidden">
+                            <div
+                              className="h-full rounded-full bg-blue-600"
+                              style={{ width: `${Math.max(3, (t.count / maxTopicCount) * 100)}%` }}
+                            />
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className="bg-white rounded-lg border border-[#e3e8ef] p-5">
+                  <h3 className="text-sm font-semibold text-slate-900 mb-3 flex items-center gap-2">
+                    <Sparkles className="w-4 h-4 text-blue-600" />
+                    AI 归因结论
+                  </h3>
+                  <p className="text-sm text-slate-700 leading-relaxed">{insight.summary}</p>
+                </div>
+
+                {insight.suggestions.length > 0 && (
+                  <div className="bg-white rounded-lg border border-[#e3e8ef] p-5">
+                    <h3 className="text-sm font-semibold text-slate-900 mb-3">改进建议</h3>
+                    <ol className="space-y-2.5">
+                      {insight.suggestions.map((s, i) => (
+                        <li key={i} className="flex gap-2.5 text-sm text-slate-700 leading-relaxed">
+                          <span className="shrink-0 w-5 h-5 rounded-full bg-blue-50 text-blue-700 text-[11px] font-semibold flex items-center justify-center mt-0.5">
+                            {i + 1}
+                          </span>
+                          {s}
+                        </li>
+                      ))}
+                    </ol>
+                  </div>
+                )}
+              </>
             )}
           </div>
         )}
 
-        {/* Search Tab */}
-        {activeTab === 'search' && (
-          <div className="space-y-6">
-            {/* Search Form */}
-            <form onSubmit={handleSearch} className="p-5 rounded-2xl bg-white/[0.02] border border-white/5">
-              <div className="flex gap-3">
-                <div className="flex-1 relative">
-                  <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-600" />
-                  <input
-                    type="text"
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="搜索热点内容..."
-                    className="w-full pl-12 pr-4 py-3 rounded-xl bg-white/5 border border-white/10 text-white placeholder-slate-600 focus:outline-none focus:border-blue-500/50 focus:ring-2 focus:ring-blue-500/20 transition-all"
-                  />
-                </div>
-                <motion.button 
-                  type="submit" 
-                  disabled={isLoading}
-                  whileHover={{ scale: 1.02 }}
-                  whileTap={{ scale: 0.98 }}
-                  className="px-6 py-3 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-500 text-white font-medium flex items-center gap-2 shadow-lg shadow-blue-500/25 disabled:opacity-50"
+        {/* ============ AI 试算 ============ */}
+        {activeTab === 'playground' && (
+          <div className="space-y-4">
+            <div className="bg-white rounded-lg border border-[#e3e8ef] p-5">
+              <h3 className="text-sm font-semibold text-slate-900 mb-1">单条文本即时分析</h3>
+              <p className="text-xs text-slate-500 mb-4">
+                验证 AI 标注效果，不落库。支持繁体中文、粤语口语、英文与中英混排。
+              </p>
+
+              <textarea
+                value={tryText}
+                onChange={(e) => setTryText(e.target.value)}
+                rows={4}
+                placeholder="粘贴一段客户反馈…"
+                className="w-full px-3 py-2.5 rounded-md border border-[#e3e8ef] text-sm text-slate-700 placeholder:text-slate-400 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20 resize-none"
+              />
+
+              <div className="flex flex-wrap items-center gap-3 mt-3">
+                <select
+                  value={tryProduct}
+                  onChange={(e) => setTryProduct(e.target.value)}
+                  className="h-8 pl-2.5 pr-7 rounded-md border border-[#e3e8ef] bg-white text-[13px] text-slate-700 focus:outline-none focus:border-blue-500 appearance-none bg-[url('data:image/svg+xml;charset=utf-8,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2216%22 height=%2216%22 fill=%22none%22 stroke=%22%2394a3b8%22 stroke-width=%222%22%3E%3Cpath d=%22M4 6l4 4 4-4%22/%3E%3C/svg%3E')] bg-no-repeat bg-[right_0.4rem_center] cursor-pointer"
                 >
-                  {isLoading ? (
-                    <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                  ) : (
-                    <Search className="w-4 h-4" />
-                  )}
-                  搜索
-                </motion.button>
+                  <option value="">不限产品线</option>
+                  {PRODUCT_LINES.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
+                </select>
+                <button
+                  onClick={handleTry}
+                  disabled={tryLoading || !tryText.trim()}
+                  className="h-8 px-4 rounded-md bg-blue-600 text-white text-[13px] font-medium hover:bg-blue-700 transition-colors disabled:opacity-50"
+                >
+                  {tryLoading ? '分析中…' : '分析'}
+                </button>
               </div>
-            </form>
 
-            {/* Search Filter & Sort Bar */}
-            <FilterSortBar
-              filters={searchFilters}
-              onChange={setSearchFilters}
-              keywords={keywords}
-            />
-
-            {/* Search Results */}
-            <div className="space-y-3">
-              {filteredSearchResults.length === 0 && searchResults.length > 0 && (
-                <div className="text-center py-12 rounded-2xl border border-dashed border-white/10">
-                  <p className="text-slate-500">当前筛选条件下无结果</p>
-                  <p className="text-sm text-slate-600 mt-1">尝试调整筛选条件</p>
-                </div>
-              )}
-              {filteredSearchResults.map((hotspot, i) => {
-                const heatScore = calcHeatScore(hotspot);
-                const heat = getHeatLevel(heatScore);
-                return (
-                <motion.div 
-                  key={hotspot.id} 
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  transition={{ delay: i * 0.03 }}
-                  className="group p-5 rounded-2xl bg-white/[0.02] hover:bg-white/[0.04] border border-white/5 transition-all"
-                >
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="flex-1 min-w-0">
-                      <div className="flex flex-wrap items-center gap-2 mb-3">
-                        <span className={cn(
-                          "px-2.5 py-1 rounded-lg text-[10px] font-semibold uppercase flex items-center",
-                          hotspot.importance === 'urgent' && "bg-red-500/15 text-red-400 border border-red-500/20",
-                          hotspot.importance === 'high' && "bg-orange-500/15 text-orange-400 border border-orange-500/20",
-                          hotspot.importance === 'medium' && "bg-amber-500/15 text-amber-400 border border-amber-500/20",
-                          hotspot.importance === 'low' && "bg-emerald-500/15 text-emerald-400 border border-emerald-500/20"
-                        )}>
-                          {getImportanceIcon(hotspot.importance)}
-                          <span className="ml-1">{hotspot.importance}</span>
-                        </span>
-                        <span className="flex items-center gap-1 text-xs text-slate-600">
-                          {getSourceIcon(hotspot.source)}
-                          {getSourceLabel(hotspot.source)}
-                        </span>
-                        {!hotspot.isReal && (
-                          <span className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-md bg-red-500/10 text-red-400 border border-red-500/20">
-                            <ShieldAlert className="w-3 h-3" />
-                            可疑
-                          </span>
-                        )}
-                        <span className={cn("flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-md bg-white/5 border border-white/10 font-medium", heat.color)}>
-                          <ThermometerSun className="w-3 h-3" />
-                          {heat.label} {heatScore}
-                        </span>
-                      </div>
-                      <h3 className="font-medium text-white mb-2 group-hover:text-blue-400 transition-colors">{hotspot.title}</h3>
-                      {hotspot.summary && (
-                        <div className="mb-2">
-                          <span className="text-[10px] text-blue-400/60 font-medium mr-1.5">AI 摘要</span>
-                          <span className="text-sm text-slate-500">{hotspot.summary}</span>
-                        </div>
-                      )}
-                      {hotspot.authorName && (
-                        <div className="flex items-center gap-2 mb-2">
-                          <User className="w-4 h-4 text-slate-600" />
-                          <span className="text-xs text-slate-400">{hotspot.authorName}</span>
-                          {hotspot.authorVerified && (
-                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/15 text-blue-400">✓ 认证</span>
-                          )}
-                        </div>
-                      )}
-                      <div className="flex flex-wrap items-center gap-3 text-xs text-slate-600">
-                        <span className="flex items-center gap-1">
-                          <Target className="w-3.5 h-3.5" />
-                          相关性 {hotspot.relevance}%
-                        </span>
-                        {hotspot.likeCount != null && hotspot.likeCount > 0 && (
-                          <span className="flex items-center gap-1" title="点赞">
-                            <Zap className="w-3.5 h-3.5" />
-                            {hotspot.likeCount.toLocaleString()}
-                          </span>
-                        )}
-                        {hotspot.viewCount != null && hotspot.viewCount > 0 && (
-                          <span className="flex items-center gap-1" title="浏览量">
-                            <Eye className="w-3.5 h-3.5" />
-                            {hotspot.viewCount.toLocaleString()}
-                          </span>
-                        )}
-                      </div>
-                      {hotspot.publishedAt && (
-                        <div className="flex items-center gap-1 text-[11px] text-slate-600 mt-1" title={formatDateTime(hotspot.publishedAt)}>
-                          <Clock className="w-3 h-3" />
-                          发布 {relativeTime(hotspot.publishedAt)}
-                        </div>
-                      )}
-                    </div>
-                    <a
-                      href={hotspot.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="shrink-0 px-4 py-2 rounded-xl bg-blue-500/10 hover:bg-blue-500/20 text-blue-400 text-sm font-medium transition-all"
+              <div className="mt-4 pt-4 border-t border-[#eef2f7]">
+                <div className="text-xs text-slate-500 mb-2">示例文本</div>
+                <div className="flex flex-wrap gap-2">
+                  {SAMPLE_TEXTS.map(s => (
+                    <button
+                      key={s}
+                      onClick={() => setTryText(s)}
+                      className="px-2.5 py-1 rounded border border-[#e3e8ef] text-xs text-slate-500 hover:border-blue-400 hover:text-blue-600 transition-colors text-left"
                     >
-                      查看
-                    </a>
-                  </div>
-                </motion.div>
-                );
-              })}
+                      {s.length > 20 ? s.slice(0, 20) + '…' : s}
+                    </button>
+                  ))}
+                </div>
+              </div>
             </div>
+
+            {tryResult && (
+              <div className="bg-white rounded-lg border border-[#e3e8ef] p-5">
+                <h3 className="text-sm font-semibold text-slate-900 mb-4">分析结果</h3>
+                <dl className="divide-y divide-[#eef2f7]">
+                  <ResultRow label="情感倾向" value={SENTIMENT_LABELS[tryResult.sentiment] ?? tryResult.sentiment} />
+                  <ResultRow label="紧急度" value={URGENCY_LABELS[tryResult.urgency] ?? tryResult.urgency} />
+                  <ResultRow label="主题标签" value={tryResult.topics.length ? tryResult.topics.join('、') : '—'} />
+                  <ResultRow label="AI 归因" value={tryResult.aiSummary} />
+                  <ResultRow label="定级理由" value={tryResult.urgencyReason} />
+                  <ResultRow label="置信度" value={`${(tryResult.confidence * 100).toFixed(0)}%`} />
+                </dl>
+              </div>
+            )}
           </div>
         )}
-      </main>
+      </Layout>
+
+      {/* Toast */}
+      {toast && (
+        <div className="fixed top-4 right-4 z-[60] flex items-center gap-2 px-4 py-2.5 rounded-lg bg-white border border-[#e3e8ef] shadow-lg">
+          {toast.type === 'success'
+            ? <Check className="w-4 h-4 text-emerald-600" />
+            : <X className="w-4 h-4 text-red-600" />}
+          <span className="text-[13px] text-slate-700">{toast.message}</span>
+        </div>
+      )}
+    </>
+  );
+}
+
+const SENTIMENT_LABELS: Record<string, string> = {
+  positive: '正面', neutral: '中性', negative: '负面'
+};
+
+const URGENCY_LABELS: Record<string, string> = {
+  critical: '紧急', action: '需处理', attention: '需关注', info: '一般'
+};
+
+const TONE_ICON: Record<string, string> = {
+  default: 'text-slate-400',
+  blue: 'text-blue-600',
+  rose: 'text-rose-600',
+  amber: 'text-amber-600',
+  emerald: 'text-emerald-600'
+};
+
+function StatCard({
+  icon: Icon,
+  label,
+  value,
+  hint,
+  tone = 'default'
+}: {
+  icon: React.ElementType;
+  label: string;
+  value: string;
+  hint?: string;
+  tone?: string;
+}) {
+  return (
+    <div className="bg-white rounded-lg border border-[#e3e8ef] p-4">
+      <div className="flex items-center gap-1.5 text-xs text-slate-500 mb-2">
+        <Icon className={cn("w-3.5 h-3.5", TONE_ICON[tone] ?? TONE_ICON.default)} />
+        {label}
+      </div>
+      <div className="text-2xl font-semibold text-slate-900 leading-tight">{value}</div>
+      {hint && <div className="text-[11px] text-slate-400 mt-1">{hint}</div>}
     </div>
   );
 }
+
+function ResultRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex gap-4 py-2.5">
+      <dt className="w-[80px] shrink-0 text-xs text-slate-500 pt-0.5">{label}</dt>
+      <dd className="flex-1 text-sm text-slate-700 leading-relaxed">{value}</dd>
+    </div>
+  );
+}
+
+const SAMPLE_TEXTS = [
+  '理賠拖咗三個星期都未批，打電話又無人聽，好失望',
+  'Claim rejected without any clear explanation. I will escalate to the Insurance Authority.',
+  '當初 agent 話全保，原來一堆除外責任，講一套做一套',
+  '客服阿 May 解釋得好清楚，好有耐性，讚',
+  '續保保費加咗三成，事前完全無通知'
+];
 
 export default App;

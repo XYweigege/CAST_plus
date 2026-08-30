@@ -1,295 +1,181 @@
-import { useState } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
-import {
-  ArrowUpDown, Filter, X, Clock, Flame, TrendingUp, Target,
-  ChevronDown, Check, RotateCcw
-} from 'lucide-react';
+import { useState, useEffect } from 'react';
+import { Search, RotateCcw, Clock, AlertTriangle, Star, Shield } from 'lucide-react';
 import { cn } from '../lib/utils';
-import type { Keyword } from '../services/api';
+import { PRODUCT_LINES, SENTIMENTS, SOURCES, URGENCIES } from '../constants';
+import type { Topic } from '../services/api';
 
 export interface FilterState {
+  keyword: string;
   source: string;
-  importance: string;
-  keywordId: string;
+  sentiment: string;
+  urgency: string;
+  productLine: string;
+  topicId: string;
   timeRange: string;
-  isReal: string;
+  pendingReview: string;
   sortBy: string;
   sortOrder: string;
 }
 
 export const defaultFilterState: FilterState = {
+  keyword: '',
   source: '',
-  importance: '',
-  keywordId: '',
+  sentiment: '',
+  urgency: '',
+  productLine: '',
+  topicId: '',
   timeRange: '',
-  isReal: '',
+  pendingReview: '',
   sortBy: 'createdAt',
-  sortOrder: 'desc',
+  sortOrder: 'desc'
 };
 
-interface FilterSortBarProps {
+interface Props {
   filters: FilterState;
   onChange: (filters: FilterState) => void;
-  keywords: Keyword[];
+  topics: Topic[];
 }
 
 const SORT_OPTIONS = [
-  { value: 'createdAt', label: '最新发现', icon: Clock },
-  { value: 'publishedAt', label: '最新发布', icon: Clock },
-  { value: 'importance', label: '重要程度', icon: Flame },
-  { value: 'relevance', label: '相关性', icon: Target },
-  { value: 'hot', label: '热度综合', icon: TrendingUp },
+  { value: 'createdAt', label: '最新', icon: Clock },
+  { value: 'urgency', label: '紧急度', icon: AlertTriangle },
+  { value: 'rating', label: '评分', icon: Star },
+  { value: 'confidence', label: '置信度', icon: Shield }
 ];
 
-const SOURCE_OPTIONS = [
-  { value: '', label: '全部来源' },
-  { value: 'twitter', label: 'Twitter' },
-  { value: 'bing', label: 'Bing' },
-  { value: 'google', label: 'Google' },
-  { value: 'sogou', label: '搜狗' },
-  { value: 'bilibili', label: 'Bilibili' },
-  { value: 'weibo', label: '微博热搜' },
-  { value: 'hackernews', label: 'HackerNews' },
-  { value: 'duckduckgo', label: 'DuckDuckGo' },
-];
-
-const IMPORTANCE_OPTIONS = [
-  { value: '', label: '全部等级' },
-  { value: 'urgent', label: '🔴 紧急', color: 'text-red-400' },
-  { value: 'high', label: '🟠 高', color: 'text-orange-400' },
-  { value: 'medium', label: '🟡 中', color: 'text-amber-400' },
-  { value: 'low', label: '🟢 低', color: 'text-emerald-400' },
-];
-
-const TIME_RANGE_OPTIONS = [
+const TIME_OPTIONS = [
   { value: '', label: '全部时间' },
-  { value: '1h', label: '最近 1 小时' },
+  { value: '24h', label: '最近 24 小时' },
   { value: 'today', label: '今天' },
   { value: '7d', label: '最近 7 天' },
-  { value: '30d', label: '最近 30 天' },
+  { value: '30d', label: '最近 30 天' }
 ];
 
-const REAL_OPTIONS = [
-  { value: '', label: '全部' },
-  { value: 'true', label: '✅ 真实' },
-  { value: 'false', label: '⚠️ 疑似虚假' },
-];
+const selectCls =
+  "h-8 pl-2.5 pr-7 rounded-md border border-[#e3e8ef] bg-white text-[13px] text-slate-700 " +
+  "focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20 " +
+  "appearance-none bg-[url('data:image/svg+xml;charset=utf-8,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2216%22 height=%2216%22 fill=%22none%22 stroke=%22%2394a3b8%22 stroke-width=%222%22%3E%3Cpath d=%22M4 6l4 4 4-4%22/%3E%3C/svg%3E')] bg-no-repeat bg-[right_0.4rem_center] cursor-pointer";
 
-// Dropdown component
-function Dropdown({ 
-  label, 
-  value, 
-  options, 
-  onChange 
-}: { 
-  label: string; 
-  value: string; 
-  options: { value: string; label: string; color?: string }[];
-  onChange: (v: string) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const selected = options.find(o => o.value === value);
-  const isActive = value !== '';
+export default function FilterSortBar({ filters, onChange, topics }: Props) {
+  const [keyword, setKeyword] = useState(filters.keyword);
 
-  return (
-    <div className="relative">
-      <button
-        onClick={() => setOpen(!open)}
-        className={cn(
-          "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all whitespace-nowrap",
-          isActive
-            ? "bg-blue-500/15 text-blue-400 border border-blue-500/30"
-            : "bg-white/5 text-slate-400 border border-white/10 hover:border-white/20 hover:text-slate-300"
-        )}
-      >
-        <span>{isActive ? selected?.label : label}</span>
-        <ChevronDown className={cn("w-3 h-3 transition-transform", open && "rotate-180")} />
-      </button>
+  // 关键词输入防抖，避免每敲一个字就请求
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (keyword !== filters.keyword) {
+        onChange({ ...filters, keyword });
+      }
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [keyword]); // eslint-disable-line react-hooks/exhaustive-deps
 
-      <AnimatePresence>
-        {open && (
-          <>
-            <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-            <motion.div
-              initial={{ opacity: 0, y: 4, scale: 0.96 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: 4, scale: 0.96 }}
-              transition={{ duration: 0.15 }}
-              className="absolute left-0 top-full mt-1 z-50 min-w-[160px] bg-[#0d0d20]/98 backdrop-blur-xl rounded-xl border border-white/10 shadow-2xl overflow-hidden"
-            >
-              {options.map((option) => (
-                <button
-                  key={option.value}
-                  onClick={() => { onChange(option.value); setOpen(false); }}
-                  className={cn(
-                    "w-full flex items-center gap-2 px-3 py-2 text-xs transition-colors text-left",
-                    value === option.value
-                      ? "bg-blue-500/10 text-blue-400"
-                      : "text-slate-400 hover:bg-white/5 hover:text-white"
-                  )}
-                >
-                  {value === option.value && <Check className="w-3 h-3 shrink-0" />}
-                  <span className={cn(option.color)}>{option.label}</span>
-                </button>
-              ))}
-            </motion.div>
-          </>
-        )}
-      </AnimatePresence>
-    </div>
-  );
-}
+  const update = (key: keyof FilterState, value: string) => onChange({ ...filters, [key]: value });
 
-export default function FilterSortBar({ filters, onChange, keywords }: FilterSortBarProps) {
-  const [showFilters, setShowFilters] = useState(false);
-
-  const activeFilterCount = [
+  const activeCount = [
+    filters.keyword,
     filters.source,
-    filters.importance,
-    filters.keywordId,
+    filters.sentiment,
+    filters.urgency,
+    filters.productLine,
+    filters.topicId,
     filters.timeRange,
-    filters.isReal,
-  ].filter(v => v !== '').length;
+    filters.pendingReview
+  ].filter(Boolean).length;
 
-  const hasNonDefaultSort = filters.sortBy !== 'createdAt';
-
-  const update = (key: keyof FilterState, value: string) => {
-    onChange({ ...filters, [key]: value });
-  };
-
-  const resetFilters = () => {
+  const reset = () => {
+    setKeyword('');
     onChange({ ...defaultFilterState });
   };
 
-  const keywordOptions = [
-    { value: '', label: '全部关键词' },
-    ...keywords.filter(k => k.isActive).map(k => ({ value: k.id, label: k.text })),
-  ];
-
   return (
-    <div className="space-y-3">
-      {/* Main Bar: Sort + Filter Toggle */}
-      <div className="flex items-center gap-2 flex-wrap">
-        {/* Sort Selector */}
-        <div className="flex items-center gap-1 bg-white/[0.03] rounded-xl border border-white/5 p-1">
-          <ArrowUpDown className="w-3.5 h-3.5 text-slate-600 ml-2" />
-          {SORT_OPTIONS.map((opt) => {
+    <div className="bg-white rounded-lg border border-[#e3e8ef] p-3">
+      <div className="flex flex-wrap items-center gap-2">
+        {/* 关键词搜索 */}
+        <div className="relative">
+          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" />
+          <input
+            value={keyword}
+            onChange={(e) => setKeyword(e.target.value)}
+            placeholder="搜索反馈内容或 AI 归因"
+            className="h-8 w-[220px] pl-8 pr-3 rounded-md border border-[#e3e8ef] bg-white text-[13px] text-slate-700 placeholder:text-slate-400 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20"
+          />
+        </div>
+
+        <Divider />
+
+        <select className={selectCls} value={filters.sentiment} onChange={e => update('sentiment', e.target.value)}>
+          <option value="">全部情感</option>
+          {SENTIMENTS.map(s => <option key={s.value} value={s.value}>{s.label}</option>)}
+        </select>
+
+        <select className={selectCls} value={filters.urgency} onChange={e => update('urgency', e.target.value)}>
+          <option value="">全部紧急度</option>
+          {URGENCIES.map(u => <option key={u.value} value={u.value}>{u.label}</option>)}
+        </select>
+
+        <select className={selectCls} value={filters.productLine} onChange={e => update('productLine', e.target.value)}>
+          <option value="">全部产品线</option>
+          {PRODUCT_LINES.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
+        </select>
+
+        <select className={selectCls} value={filters.source} onChange={e => update('source', e.target.value)}>
+          <option value="">全部渠道</option>
+          {SOURCES.map(s => <option key={s.value} value={s.value}>{s.label}</option>)}
+        </select>
+
+        <select className={selectCls} value={filters.topicId} onChange={e => update('topicId', e.target.value)}>
+          <option value="">全部主题词</option>
+          {topics.filter(t => t.isActive).map(t => <option key={t.id} value={t.id}>{t.text}</option>)}
+        </select>
+
+        <select className={selectCls} value={filters.timeRange} onChange={e => update('timeRange', e.target.value)}>
+          {TIME_OPTIONS.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+        </select>
+
+        <select className={selectCls} value={filters.pendingReview} onChange={e => update('pendingReview', e.target.value)}>
+          <option value="">全部状态</option>
+          <option value="true">仅待复核</option>
+        </select>
+
+        {activeCount > 0 && (
+          <button
+            onClick={reset}
+            className="h-8 px-2.5 rounded-md text-[13px] text-slate-500 hover:text-blue-600 hover:bg-blue-50 inline-flex items-center gap-1 transition-colors"
+          >
+            <RotateCcw className="w-3.5 h-3.5" />
+            重置
+          </button>
+        )}
+      </div>
+
+      {/* 排序 */}
+      <div className="flex items-center gap-2 mt-3 pt-3 border-t border-[#eef2f7]">
+        <span className="text-xs text-slate-500">排序</span>
+        <div className="flex items-center gap-1">
+          {SORT_OPTIONS.map(opt => {
             const Icon = opt.icon;
             return (
               <button
                 key={opt.value}
                 onClick={() => update('sortBy', opt.value)}
                 className={cn(
-                  "flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all whitespace-nowrap",
+                  "h-7 px-2.5 rounded-md text-xs font-medium inline-flex items-center gap-1 transition-colors",
                   filters.sortBy === opt.value
-                    ? "bg-blue-500/15 text-blue-400 shadow-sm"
-                    : "text-slate-500 hover:text-slate-300"
+                    ? "bg-blue-50 text-blue-700 border border-blue-200"
+                    : "text-slate-500 hover:bg-slate-50 border border-transparent"
                 )}
               >
-                <Icon className="w-3 h-3" />
+                <Icon className="w-3.5 h-3.5" />
                 {opt.label}
               </button>
             );
           })}
         </div>
-
-        {/* Filter Toggle */}
-        <button
-          onClick={() => setShowFilters(!showFilters)}
-          className={cn(
-            "flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium transition-all",
-            showFilters || activeFilterCount > 0
-              ? "bg-blue-500/15 text-blue-400 border border-blue-500/30"
-              : "bg-white/5 text-slate-400 border border-white/10 hover:border-white/20"
-          )}
-        >
-          <Filter className="w-3.5 h-3.5" />
-          筛选
-          {activeFilterCount > 0 && (
-            <span className="w-4 h-4 rounded-full bg-blue-500 text-[10px] text-white flex items-center justify-center font-bold">
-              {activeFilterCount}
-            </span>
-          )}
-        </button>
-
-        {/* Reset */}
-        {(activeFilterCount > 0 || hasNonDefaultSort) && (
-          <button
-            onClick={resetFilters}
-            className="flex items-center gap-1 px-2.5 py-2 rounded-xl text-xs text-slate-500 hover:text-slate-300 transition-colors"
-          >
-            <RotateCcw className="w-3 h-3" />
-            重置
-          </button>
-        )}
-
-        {/* Active Filter Tags */}
-        {activeFilterCount > 0 && !showFilters && (
-          <div className="flex items-center gap-1.5 flex-wrap">
-            {filters.source && (
-              <FilterTag
-                label={SOURCE_OPTIONS.find(o => o.value === filters.source)?.label || filters.source}
-                onRemove={() => update('source', '')}
-              />
-            )}
-            {filters.importance && (
-              <FilterTag
-                label={IMPORTANCE_OPTIONS.find(o => o.value === filters.importance)?.label || filters.importance}
-                onRemove={() => update('importance', '')}
-              />
-            )}
-            {filters.keywordId && (
-              <FilterTag
-                label={keywords.find(k => k.id === filters.keywordId)?.text || '关键词'}
-                onRemove={() => update('keywordId', '')}
-              />
-            )}
-            {filters.timeRange && (
-              <FilterTag
-                label={TIME_RANGE_OPTIONS.find(o => o.value === filters.timeRange)?.label || filters.timeRange}
-                onRemove={() => update('timeRange', '')}
-              />
-            )}
-            {filters.isReal && (
-              <FilterTag
-                label={REAL_OPTIONS.find(o => o.value === filters.isReal)?.label || '真实性'}
-                onRemove={() => update('isReal', '')}
-              />
-            )}
-          </div>
-        )}
       </div>
-
-      {/* Expanded Filter Panel */}
-      <AnimatePresence>
-        {showFilters && (
-          <motion.div
-            initial={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: 'auto' }}
-            exit={{ opacity: 0, height: 0 }}
-            transition={{ duration: 0.2 }}
-          >
-            <div className="flex items-center gap-2 flex-wrap p-3 rounded-xl bg-white/[0.02] border border-white/5">
-              <Dropdown label="来源" value={filters.source} options={SOURCE_OPTIONS} onChange={(v) => update('source', v)} />
-              <Dropdown label="重要程度" value={filters.importance} options={IMPORTANCE_OPTIONS} onChange={(v) => update('importance', v)} />
-              <Dropdown label="关键词" value={filters.keywordId} options={keywordOptions} onChange={(v) => update('keywordId', v)} />
-              <Dropdown label="时间" value={filters.timeRange} options={TIME_RANGE_OPTIONS} onChange={(v) => update('timeRange', v)} />
-              <Dropdown label="真实性" value={filters.isReal} options={REAL_OPTIONS} onChange={(v) => update('isReal', v)} />
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
     </div>
   );
 }
 
-function FilterTag({ label, onRemove }: { label: string; onRemove: () => void }) {
-  return (
-    <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-blue-500/10 text-blue-400 text-[10px] font-medium border border-blue-500/20">
-      {label}
-      <button onClick={onRemove} className="hover:text-white transition-colors">
-        <X className="w-2.5 h-2.5" />
-      </button>
-    </span>
-  );
+function Divider() {
+  return <span className="w-px h-5 bg-[#e3e8ef]" />;
 }

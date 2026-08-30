@@ -1,103 +1,70 @@
-export interface SearchResult {
-  title: string;
+// ============ 保险客户声音（VoC）领域类型定义 ============
+
+/** 反馈来源渠道 */
+export type FeedbackSource =
+  | 'survey' // 客户调查问卷（NPS / CSAT）
+  | 'claim' // 索赔反馈
+  | 'service' // 客服工单
+  | 'social' // 社媒公开内容
+  | 'appstore' // 应用商店评论
+  | 'email'; // 客户邮件
+
+/** 情感倾向 */
+export type Sentiment = 'positive' | 'neutral' | 'negative';
+
+/** 紧急度：决定预警与推送策略 */
+export type Urgency = 'info' | 'attention' | 'action' | 'critical';
+
+/** 采集到的原始反馈条目 */
+export interface FeedbackItem {
+  title?: string;
   content: string;
-  url: string;
-  source: 'twitter' | 'bing' | 'google' | 'duckduckgo' | 'hackernews' | 'sogou' | 'bilibili' | 'weibo';
+  source: FeedbackSource;
   sourceId?: string;
+  url?: string;
+  rating?: number; // 1-5
+  productLine?: string;
+  language?: string;
+  authorName?: string;
   publishedAt?: Date;
-  viewCount?: number;
-  likeCount?: number;
-  retweetCount?: number;
-  replyCount?: number; // Twitter 回复数
-  quoteCount?: number; // Twitter 引用数
-  score?: number; // Hacker News score
-  commentCount?: number; // Hacker News / Bilibili comments
-  danmakuCount?: number; // Bilibili 弹幕数
-  author?: {
-    name: string;
-    username?: string;
-    avatar?: string;
-    followers?: number;
-    verified?: boolean;
-  };
 }
 
-// Twitter 质量过滤配置
-export interface TwitterFilterConfig {
-  minLikes: number;
-  minRetweets: number;
-  minViews: number;
-  minFollowers: number;
-  onlyOriginalTweets: boolean; // 过滤回复和引用
+/** AI 结构化分析结果 */
+export interface FeedbackAnalysis {
+  sentiment: Sentiment;
+  topics: string[];
+  urgency: Urgency;
+  urgencyReason: string;
+  aiSummary: string;
+  confidence: number; // 0-1
 }
 
-export interface AIAnalysis {
-  isReal: boolean;
-  relevance: number;
-  relevanceReason: string; // AI 判断相关性的理由
-  keywordMentioned: boolean; // 内容中是否直接提及了关键词或其核心概念
-  importance: 'low' | 'medium' | 'high' | 'urgent';
-  summary: string; // 与关键词的关联说明（不是单纯的内容介绍）
-}
-
-export interface HotspotWithKeyword {
+/** 带主题关联的完整反馈（返回给前端） */
+export interface FeedbackWithTopic {
   id: string;
-  title: string;
+  title: string | null;
   content: string;
-  url: string;
   source: string;
   sourceId: string | null;
-  isReal: boolean;
-  relevance: number;
-  relevanceReason: string | null;
-  keywordMentioned: boolean | null;
-  importance: string;
-  summary: string | null;
-  viewCount: number | null;
-  likeCount: number | null;
-  retweetCount: number | null;
-  replyCount: number | null;
-  commentCount: number | null;
-  quoteCount: number | null;
-  danmakuCount: number | null;
+  url: string | null;
+  rating: number | null;
+  productLine: string | null;
+  language: string | null;
   authorName: string | null;
-  authorUsername: string | null;
-  authorAvatar: string | null;
-  authorFollowers: number | null;
-  authorVerified: boolean | null;
   publishedAt: Date | null;
   createdAt: Date;
-  keywordId: string | null;
-  keyword: {
+  sentiment: string;
+  topics: string | null;
+  urgency: string;
+  urgencyReason: string | null;
+  aiSummary: string | null;
+  confidence: number | null;
+  humanLabel: string | null;
+  isReviewed: boolean;
+  topicId: string | null;
+  topic: {
     id: string;
     text: string;
     category: string | null;
   } | null;
-}
-
-export interface Tweet {
-  type: string;
-  id: string;
-  url: string;
-  text: string;
-  retweetCount: number;
-  replyCount: number;
-  likeCount: number;
-  quoteCount: number;
-  viewCount: number;
-  createdAt: string;
-  lang: string;
-  author: {
-    userName: string;
-    name: string;
-    isBlueVerified: boolean;
-    profilePicture: string;
-    followers: number;
-  };
-}
-
-export interface TwitterSearchResponse {
-  tweets: Tweet[];
-  has_next_page: boolean;
-  next_cursor: string;
 }

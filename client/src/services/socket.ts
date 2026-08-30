@@ -10,60 +10,55 @@ export function getSocket(): Socket {
     });
 
     socket.on('connect', () => {
-      console.log('🔌 Socket connected:', socket?.id);
+      console.log('Socket connected:', socket?.id);
     });
 
     socket.on('disconnect', () => {
-      console.log('🔌 Socket disconnected');
+      console.log('Socket disconnected');
     });
 
     socket.on('connect_error', (error) => {
-      console.error('🔌 Socket connection error:', error);
+      console.error('Socket connection error:', error);
     });
   }
 
   return socket;
 }
 
-export function subscribeToKeywords(keywords: string[]): void {
-  const s = getSocket();
-  s.emit('subscribe', keywords);
+export function subscribeToTopics(topics: string[]): void {
+  getSocket().emit('subscribe', topics);
 }
 
-export function unsubscribeFromKeywords(keywords: string[]): void {
-  const s = getSocket();
-  s.emit('unsubscribe', keywords);
+export function unsubscribeFromTopics(topics: string[]): void {
+  getSocket().emit('unsubscribe', topics);
 }
 
-export interface HotspotEvent {
+export interface FeedbackEvent {
+  id: string;
+  content: string;
+  urgency: string;
+  sentiment: string;
+  aiSummary: string | null;
+}
+
+export interface AlertEvent {
   id: string;
   title: string;
   content: string;
-  url: string;
-  source: string;
-  importance: string;
-  summary: string | null;
-  keyword?: { text: string } | null;
+  urgency: string;
+  feedbackId?: string;
 }
 
-export interface NotificationEvent {
-  type: string;
-  title: string;
-  content: string;
-  hotspotId?: string;
-  importance?: string;
-}
-
-export function onNewHotspot(callback: (hotspot: HotspotEvent) => void): () => void {
+export function onNewFeedback(callback: (feedback: FeedbackEvent) => void): () => void {
   const s = getSocket();
-  s.on('hotspot:new', callback);
-  return () => s.off('hotspot:new', callback);
+  s.on('feedback:new', callback);
+  return () => s.off('feedback:new', callback);
 }
 
-export function onNotification(callback: (notification: NotificationEvent) => void): () => void {
+export function onAlert(callback: (alert: AlertEvent) => void): () => void {
   const s = getSocket();
-  s.on('notification', callback);
-  return () => s.off('notification', callback);
+  s.on('alert', callback);
+  return () => s.off('alert', callback);
 }
 
 export function disconnectSocket(): void {
