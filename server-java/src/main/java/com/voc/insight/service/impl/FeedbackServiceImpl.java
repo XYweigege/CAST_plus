@@ -158,7 +158,7 @@ public class FeedbackServiceImpl extends ServiceImpl<FeedbackMapper, Feedback> i
         QueryWrapper<Feedback> qw = new QueryWrapper<>();
         qw.select("AVG(rating) AS avg_rating").isNotNull("rating");
         List<Map<String, Object>> rows = this.baseMapper.selectMaps(qw);
-        if (rows.isEmpty() || rows.get(0).get("avg_rating") == null) {
+        if (rows.isEmpty() || rows.get(0) == null || rows.get(0).get("avg_rating") == null) {
             return null;
         }
         return Math.round(((Number) rows.get(0).get("avg_rating")).doubleValue() * 100) / 100.0;

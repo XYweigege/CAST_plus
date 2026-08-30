@@ -1,6 +1,9 @@
 -- 保险客户声音智能分析系统 - 建库建表
 -- MySQL 8 / utf8mb4
 
+-- 客户端连接字符集必须显式指定，否则 docker 初始化时中文种子数据会以 latin1 写入成乱码
+SET NAMES utf8mb4;
+
 CREATE DATABASE IF NOT EXISTS voc_insight DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 
 USE voc_insight;
