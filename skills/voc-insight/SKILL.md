@@ -1,11 +1,6 @@
 ---
 name: voc-insight
-description: >
-  保险客户声音（VoC）分析技能。查询与筛选客户反馈、对单条文本做情感与主题标注、
-  生成产品评分归因报告、查看预警。Use when users ask about: 客户反馈、满意度分析、
-  负面反馈、投诉预警、理赔时效、销售误导、拒赔争议、评分归因、"最近客户在抱怨什么"、
-  "这个产品评分为什么低"、"帮我分析这段客户原话"、"生成客户声音报告"、
-  "analyze customer feedback", "voice of customer report", "why is the rating low".
+description: 保险客户声音（VoC）分析技能。查询与筛选客户反馈、对单条文本做情感与主题标注、生成产品评分归因报告、查看预警。Use when users ask about 客户反馈、满意度分析、负面反馈、投诉预警、理赔时效、销售误导、拒赔争议、评分归因、"最近客户在抱怨什么"、"这个产品评分为什么低"、"帮我分析这段客户原话"、"生成客户声音报告"、"analyze customer feedback"、"voice of customer report"、"why is the rating low"。
 ---
 
 # VoC Insight — 保险客户声音分析技能
@@ -21,11 +16,26 @@ description: >
 curl http://localhost:3001/api/health
 ```
 
-未启动则先运行：
+未启动则先运行（两套后端二选一，接口一致）：
 
 ```bash
+# Node 版
 cd server && npm run dev
+
+# Java 版（Spring Boot，需先启动 docker-compose 里的 MySQL）
+cd server-java && mvn spring-boot:run
 ```
+
+完整接口文档（含请求示例、枚举值、在线调试）见 Swagger UI：
+`http://localhost:3001/swagger-ui.html`（按客户反馈 / 主题词 / 预警中心 / 系统分组）。
+
+## 接口约定
+
+- 除 SSE 外所有接口返回统一结构 `Result{code, message, data, timestamp}`，取数据时解包 `data` 字段
+- `code=0` 成功；`code=400` 参数校验失败，`message` 为具体字段错误（多个错误以「；」分隔）
+- 业务错误码从 1000 开始：1002 主题词不存在、1003 反馈不存在、1004 预警不存在
+- 参数有严格白名单校验：`source / sentiment / urgency / productLine` 只接受业务字典枚举值，
+  `limit` 上限 200，`sortOrder` 仅 `asc / desc`，传错会直接返回 400
 
 ## 业务字典
 
@@ -87,8 +97,9 @@ curl "http://localhost:3001/api/feedbacks?pendingReview=true&sortBy=confidence&s
 ```
 
 支持的参数：`source` `sentiment` `urgency` `productLine` `topicId` `keyword`
-`pendingReview` `timeRange`(24h/today/7d/30d) `sortBy`(createdAt/urgency/rating/confidence)
-`sortOrder` `page` `limit`
+`pendingReview`(true/false) `timeRange`(24h/today/7d/30d)
+`sortBy`(createdAt/urgency/rating/confidence/publishedAt) `sortOrder`(asc/desc)
+`page`(>=1) `limit`(1-200)
 
 ### 4. 单条文本即时分析
 

@@ -1,0 +1,23 @@
+version: "3.8"
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: voc-mysql
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: root123
+      MYSQL_DATABASE: voc_insight
+      TZ: Asia/Shanghai
+    ports:
+      - "3307:3306"
+    volumes:
+      - voc-mysql-data:/var/lib/mysql
+      - ./sql:/docker-entrypoint-initdb.d
+    command: >
+      --character-set-server=utf8mb4
+      --collation-server=utf8mb4_unicode_ci
+      --default-authentication-plugin=mysql_native_password
+
+volumes:
+  voc-mysql-data:
