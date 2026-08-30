@@ -26,7 +26,7 @@
 
 ### 1. 多源反馈汇聚
 
-统一入口接入 6 类渠道：客户问卷（`survey`）、索赔反馈（`claim`）、客服工单（`service`）、社媒公开内容（`social`）、应用商店评论（`appstore`）、客户邮件（`email`）。支持 CSV / JSON 文件批量导入。
+统一入口接入 6 类渠道：客户问卷（`survey`）、索赔反馈（`claim`）、客服工单（`service`）、社媒公开内容（`social`）、应用商店评论（`appstore`）、客户邮件（`email`）。支持 CSV / JSON 文件批量导入；外部产品也可通过 `POST /api/csat/ingest` 实时推送，数据先以 raw 状态落库等待归因。
 
 ### 2. LLM 结构化标注
 
@@ -61,7 +61,7 @@ AI 生成的变体默认 `approved=false`、`isActive=false`，需人工确认�
 
 ### 4. 异步分析与分级预警
 
-「立即分析」或定时任务将采集到的反馈**投递到 RabbitMQ 消息队列**，消费者以并发 2~8 的速率处理，起到**天然限流、保护 LLM 配额**的作用。处理完成的结果经 SSE 实时推送到前端。
+采用**「先落库 raw、再定时归因」**两段式：反馈经 CSAT 推送 / 导入 / 演示生成以 `is_analyzed=0` 入库；定时任务（每日 09:00 / 14:00 / 23:30 三批，也可「立即分析」手动触发）扫描待归因记录投递到 **RabbitMQ 消息队列**，消费者以并发 2~8 **读库 → AI 归因 → 写回同一行**，起到天然限流、保护 LLM 配额的作用。归因结果经 SSE 实时推送到前端。
 
 - **单条预警**：`action` / `critical` 级别反馈触发 SSE 推送 + 写入预警中心 + 发送邮件
 - **主题突增检测**：某主题 24 小时内负面反馈超过阈值（默认 5 条）即触发预警，这往往是系统性问题的前兆，单条反馈看不出来。预警带 12 小时静默期（Redis TTL），避免告警疲劳
@@ -87,7 +87,7 @@ AI 统一集中在服务端 [AiService](server-java/src/main/java/com/voc/insigh
 
 - `sentiment` 情感、`topics` 主题（从预设 12 个白名单中选取，不允许自造标签）、`urgency` 四级紧急度、`urgencyReason` 定级理由、`aiSummary` 一句话归因、`confidence` 置信度
 - 输出经**枚举白名单校验 + 置信度钳制**三重防线，防止模型输出脏数据
-- 入口：定时任务 / MQ 消费者、文件导入、演示数据、前端「AI 试算」
+- 入口：CSAT 推送 / 文件导入 / 演示数据均先落库 raw，由定时任务扫描投递归因；前端「AI 试算」为实时试算不落库
 
 ### 2. 主题词智能扩展
 
@@ -116,11 +116,12 @@ AI 统一集中在服务端 [AiService](server-java/src/main/java/com/voc/insigh
                          │ REST（/api）+ SSE 实时推送
 ┌────────────────────────┴─────────────────────────────────┐
 │  Spring Boot 3 · Java 17 · MyBatis-Plus 3.5               │
-│  controller  Alert / Feedback / Topic / Notify            │
+│  controller  Alert / Feedback / Topic / Notify / Csat     │
 │  ┌─────────────────────────────────────────────────────┐  │
-│  │ InsightJob(定时) ─► InsightService ─► RabbitMQ 队列  │  │
-│  │  采集 → 预热扩展缓存 → 投递 → 消费者(并发)分析        │  │
-│  │  ─► FeedbackProcessService ─► SSE / 预警 / 邮件      │  │
+│  │ CSAT推送/导入/演示 ─► raw 落库(is_analyzed=0)        │  │
+│  │ InsightJob(每日3批定时) ─► 扫描待归因 ─► RabbitMQ 队列│  │
+│  │  消费者(并发): 读库 → AI归因 → 写回同一行(is_analyzed=1)│ │
+│  │  ─► SSE 推送 / 预警 / 邮件                            │  │
 │  └─────────────────────────────────────────────────────┘  │
 │  AiService(标注/扩展/归因) · FeedbackSource(语料/导入)     │
 └────────────────────────┬─────────────────────────────────┘
@@ -163,6 +164,14 @@ AI 统一集中在服务端 [AiService](server-java/src/main/java/com/voc/insigh
 - 消费者**并发 + prefetch** 控速，天然保护第三方 LLM 配额
 - 失败自动重试（`max-attempts: 3`），个别批次失败不影响整体
 
+### 为何「先落库 raw、再定时归因」
+
+反馈先以 `is_analyzed=0` 入库，定时任务扫库投递归因，而不是采集时同步分析：
+
+- **数据不丢**：归因失败 / 服务重启都不影响原始数据，`is_analyzed=0` 天然构成待办队列，下一批自动重试
+- **削峰填谷**：外部产品可随时高频推送，归因按每日固定批次（09:00 / 14:00 / 23:30）消化，成本可控
+- **存量回填**：历史数据批量导入后无需脚本，夜间兜底批自动完成归因
+
 ### 多语言与方言处理
 
 香港客户的反馈是繁体中文、粤语口语、英文、中英混排的混合体。Prompt 中显式列出粤语负面表达（`唔賠`/`搵笨`/`搞咁耐`/`極不負責任`）并给出 few-shot 示例，覆盖四类语言形态。
@@ -196,6 +205,8 @@ docker compose up -d
 ```
 
 将自动创建 MySQL（内置建库建表 + 主题词种子数据），并拉起 Redis 与 RabbitMQ。
+
+> 存量数据库升级：若库已存在但缺少 `is_analyzed` 列，执行一次 `server-java/sql/migration_add_is_analyzed.sql`（幂等，可重复执行）。
 
 ### 2. 配置并启动服务端
 
@@ -242,9 +253,9 @@ Vite 已在 `vite.config.ts` 中将 `/api` 代理到 `http://localhost:3001`，�
 **首次体验路径**：
 
 1. 进入「主题词管理」，添加 `理赔时效`（建库种子数据已预置 4 个主题词）
-2. 返回「反馈洞察」，点击「生成演示数据」→ 立刻得到一批已标注反馈
+2. 返回「反馈洞察」，点击「生成演示数据」→ 数据以 raw 落库
 3. 点击主题词卡片上的「AI 扩展」→ 查看生成的客户口语表达变体，确认启用
-4. 点击「立即分析」→ 观察分析任务进入 MQ、结果经 SSE 实时流入与预警
+4. 点击「立即分析」→ 观察待归因记录进入 MQ、消费者归因写回，结果经 SSE 实时流入与预警
 5. 进入「评分归因」→ 选择产品线，查看主题分布与 AI 改进建议
 6. 进入「AI 试算」→ 粘贴任意文本，验证单条标注效果（不落库）
 
@@ -274,6 +285,7 @@ MySQL 库 `voc_insight`，三张核心表：
 | `sentiment` / `topics` / `urgency`    | AI 输出的情感、主题(JSON)、紧急度                |
 | `confidence`                          | 置信度 0-1                                       |
 | `is_reviewed`                         | 是否已人工复核                                   |
+| `is_analyzed`                         | 是否已归因（0=待归因，定时任务扫描；1=已归因）   |
 | `topic_id`                            | 归属主题词 ID                                    |
 
 ### alert（预警）
@@ -294,6 +306,7 @@ MySQL 库 `voc_insight`，三张核心表：
 │   ├── pom.xml
 │   ├── docker-compose.yml              MySQL / Redis / RabbitMQ 编排
 │   ├── sql/schema.sql                  建库建表 + 主题词种子数据
+│   ├── sql/migration_add_is_analyzed.sql  存量库迁移（加 is_analyzed 列）
 │   └── src/main/
 │       ├── resources/application.yml   配置（端口 / 数据源 / MQ / LLM…）
 │       └── java/com/voc/insight/
@@ -302,10 +315,10 @@ MySQL 库 `voc_insight`，三张核心表：
 │           ├── common/                 Result / ResultCode / 全局异常 / 分页
 │           ├── config/                 CORS / MyBatis-Plus / RabbitMQ / Swagger
 │           ├── constant/BusinessDict   主题 / 紧急度 / 渠道等业务字典
-│           ├── controller/             Alert / Feedback / Topic / Notify
+│           ├── controller/             Alert / Feedback / Topic / Notify / Csat
 │           ├── dto/                    请求参数对象
 │           ├── entity/                 Feedback / Topic / Alert
-│           ├── job/InsightJob          定时分析任务
+│           ├── job/InsightJob          定时归因任务（每日 3 批）
 │           ├── mapper/                 MyBatis-Plus Mapper
 │           ├── mq/                     分析任务消息 + 生产者 / 消费者
 │           ├── service/                业务服务（Insight / Topic / Feedback / Mail…）
@@ -327,13 +340,13 @@ MySQL 库 `voc_insight`，三张核心表：
 
 当前版本是**可运行的完整原型**，面向真实生产还需补充：
 
-| 事项           | 说明                                                                                            |
-| -------------- | ----------------------------------------------------------------------------------------------- |
-| 数据源接入     | `FeedbackSourceService` 的演示语料需替换为问卷 / 索赔 / 客服系统的真实接口或定时导出            |
-| 数据合规       | 香港《个人资料（私隐）条例》下，客户原始数据出境前须脱敏，或改用私有化部署模型处理含 PII 的字段 |
-| 权限与多租户   | 当前无鉴权，需按部门隔离数据与预警路由                                                          |
-| 高可用         | MySQL / Redis / RabbitMQ 单实例运行，生产建议主从与集群化部署                                   |
-| LLM 限流与重试 | MQ 消费者并发已做控速，建议补充花费(feature)预算与更细粒度超时策略                              |
+| 事项           | 说明                                                                                                    |
+| -------------- | ------------------------------------------------------------------------------------------------------- |
+| 数据源接入     | 已提供 `POST /api/csat/ingest` 推送接口，外部产品（问卷 / 索赔 / 客服系统）对接即可；也可继续用文件导入 |
+| 数据合规       | 香港《个人资料（私隐）条例》下，客户原始数据出境前须脱敏，或改用私有化部署模型处理含 PII 的字段         |
+| 权限与多租户   | 当前无鉴权，需按部门隔离数据与预警路由                                                                  |
+| 高可用         | MySQL / Redis / RabbitMQ 单实例运行，生产建议主从与集群化部署                                           |
+| LLM 限流与重试 | MQ 消费者并发已做控速，建议补充花费(feature)预算与更细粒度超时策略                                      |
 
 ---
 

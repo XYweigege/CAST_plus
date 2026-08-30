@@ -2,12 +2,20 @@
  * 实时推送通道（SSE / Server-Sent Events）。
  * Java 后端通过 GET /api/notify/stream 单向广播，浏览器 EventSource 自动重连。
  * 导出的函数签名与原 Socket.IO 版本保持一致，调用方无需改动。
+ *
+ * 认证：EventSource 无法设置自定义请求头，token 通过 URL 查询参数传递。
  */
+import { getToken } from './auth';
+
 let eventSource: EventSource | null = null;
 
 function getEventSource(): EventSource {
   if (!eventSource || eventSource.readyState === EventSource.CLOSED) {
-    eventSource = new EventSource('/api/notify/stream');
+    const token = getToken();
+    const url = token
+      ? `/api/notify/stream?token=${encodeURIComponent(token)}`
+      : '/api/notify/stream';
+    eventSource = new EventSource(url);
 
     eventSource.onopen = () => {
       console.log('SSE connected');

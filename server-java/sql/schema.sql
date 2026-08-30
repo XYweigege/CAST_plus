@@ -97,3 +97,18 @@ ON DUPLICATE KEY UPDATE id = id;
 -- 存量数据迁移：已有分析结果的反馈标记为已归因
 -- ============================================================
 UPDATE feedback SET is_analyzed = 1 WHERE sentiment != 'neutral' OR urgency != 'info';
+
+-- ============================================================
+-- 系统用户表（Spring Security：JWT 认证 + 角色授权）
+-- ============================================================
+CREATE TABLE IF NOT EXISTS sys_user (
+    id          BIGINT        NOT NULL AUTO_INCREMENT COMMENT '主键',
+    username    VARCHAR(64)   NOT NULL COMMENT '用户名',
+    password    VARCHAR(100)  NOT NULL COMMENT 'BCrypt 密码哈希',
+    role        VARCHAR(16)   NOT NULL DEFAULT 'USER' COMMENT '角色：ADMIN / USER / SERVICE',
+    enabled     TINYINT(1)    NOT NULL DEFAULT 1 COMMENT '是否启用',
+    created_at  DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at  DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_sys_user_username (username)
+) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci COMMENT = '系统用户';

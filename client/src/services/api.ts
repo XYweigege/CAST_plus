@@ -1,4 +1,6 @@
-const API_BASE = '/api';
+const API_BASE = "/api";
+
+import { getToken, clearAuth } from "./auth";
 
 export interface Topic {
   id: string;
@@ -91,10 +93,10 @@ interface ResultWrapper {
 
 function isResultWrapper(body: unknown): body is ResultWrapper {
   return (
-    typeof body === 'object' &&
+    typeof body === "object" &&
     body !== null &&
-    typeof (body as ResultWrapper).code === 'number' &&
-    'data' in body
+    typeof (body as ResultWrapper).code === "number" &&
+    "data" in body
   );
 }
 
@@ -109,7 +111,7 @@ interface JavaPage<T> {
 
 function isJavaPage(body: unknown): body is JavaPage<unknown> {
   return (
-    typeof body === 'object' &&
+    typeof body === "object" &&
     body !== null &&
     Array.isArray((body as JavaPage<unknown>).records)
   );
@@ -123,17 +125,40 @@ interface Pagination {
 }
 
 function toPagination<T>(p: JavaPage<T>): Pagination {
-  return { page: p.current, limit: p.size, total: p.total, totalPages: p.pages };
+  return {
+    page: p.current,
+    limit: p.size,
+    total: p.total,
+    totalPages: p.pages,
+  };
 }
 
-async function request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
+async function request<T>(
+  endpoint: string,
+  options: RequestInit = {},
+): Promise<T> {
+  // 注入 JWT（登录接口本身不需要）
+  const token = getToken();
+  const authHeaders: Record<string, string> =
+    token && endpoint !== "/auth/login"
+      ? { Authorization: `Bearer ${token}` }
+      : {};
+
   const response = await fetch(`${API_BASE}${endpoint}`, {
     headers: {
-      'Content-Type': 'application/json',
-      ...options.headers
+      "Content-Type": "application/json",
+      ...authHeaders,
+      ...options.headers,
     },
-    ...options
+    ...options,
   });
+
+  // 未认证 / token 过期：清除登录态并通知页面跳转登录
+  if (response.status === 401 && endpoint !== "/auth/login") {
+    clearAuth();
+    window.dispatchEvent(new Event("auth:logout"));
+    throw new Error("登录已过期，请重新登录");
+  }
 
   if (response.status === 204) {
     return undefined as T;
@@ -142,14 +167,14 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
   const body = await response.json().catch(() => null);
 
   if (!response.ok) {
-    throw new Error(body?.message || body?.error || 'Request failed');
+    throw new Error(body?.message || body?.error || "Request failed");
   }
 
   // Java 端返回统一 Result 封装（HTTP 状态恒 200，错误也在 code 里），这里解包；
   // Node 端直返业务数据，原样返回，两端兼容
   if (isResultWrapper(body)) {
     if (body.code !== 0) {
-      throw new Error(body.message || 'Request failed');
+      throw new Error(body.message || "Request failed");
     }
     return body.data as T;
   }
@@ -158,34 +183,37 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
 
 // ============ 主题词 ============
 export const topicsApi = {
-  getAll: () => request<Topic[]>('/topics'),
+  getAll: () => request<Topic[]>("/topics"),
 
   create: (data: { text: string; category?: string }) =>
-    request<Topic>('/topics', {
-      method: 'POST',
-      body: JSON.stringify(data)
+    request<Topic>("/topics", {
+      method: "POST",
+      body: JSON.stringify(data),
     }),
 
   update: (id: string, data: Partial<Topic>) =>
     request<Topic>(`/topics/${id}`, {
-      method: 'PUT',
-      body: JSON.stringify(data)
+      method: "PUT",
+      body: JSON.stringify(data),
     }),
 
-  delete: (id: string) => request<void>(`/topics/${id}`, { method: 'DELETE' }),
+  delete: (id: string) => request<void>(`/topics/${id}`, { method: "DELETE" }),
 
-  toggle: (id: string) => request<Topic>(`/topics/${id}/toggle`, { method: 'PATCH' }),
+  toggle: (id: string) =>
+    request<Topic>(`/topics/${id}/toggle`, { method: "PATCH" }),
 
   /** AI 扩展主题词为客户口语表达变体 */
   expand: (id: string) =>
-    request<{ variants: string[]; created: Topic[] }>(`/topics/${id}/expand`, { method: 'POST' }),
+    request<{ variants: string[]; created: Topic[] }>(`/topics/${id}/expand`, {
+      method: "POST",
+    }),
 
   /** 人工确认 / 否决 AI 生成的变体 */
   approve: (id: string, approved: boolean) =>
     request<Topic>(`/topics/${id}/approve`, {
-      method: 'PATCH',
-      body: JSON.stringify({ approved })
-    })
+      method: "PATCH",
+      body: JSON.stringify({ approved }),
+    }),
 };
 
 // ============ 客户反馈 ============
@@ -209,12 +237,13 @@ export const feedbacksApi = {
     const searchParams = new URLSearchParams();
     if (params) {
       Object.entries(params).forEach(([key, value]) => {
-        if (value !== undefined && value !== '') searchParams.append(key, String(value));
+        if (value !== undefined && value !== "")
+          searchParams.append(key, String(value));
       });
     }
-    const res = await request<{ data: Feedback[]; pagination: Pagination } | JavaPage<Feedback>>(
-      `/feedbacks?${searchParams}`
-    );
+    const res = await request<
+      { data: Feedback[]; pagination: Pagination } | JavaPage<Feedback>
+    >(`/feedbacks?${searchParams}`);
     // Java 端直返 PageResult，映射为前端期望的 { data, pagination } 结构
     if (isJavaPage(res)) {
       return { data: res.records as Feedback[], pagination: toPagination(res) };
@@ -222,48 +251,64 @@ export const feedbacksApi = {
     return res;
   },
 
-  getStats: () => request<Stats>('/feedbacks/stats'),
+  getStats: () => request<Stats>("/feedbacks/stats"),
 
   getById: (id: string) => request<Feedback>(`/feedbacks/${id}`),
 
   /** 单条文本即时分析，不落库 */
-  analyze: (data: { content: string; productLine?: string; rating?: number; language?: string }) =>
-    request<AnalysisResult>('/feedbacks/analyze', {
-      method: 'POST',
-      body: JSON.stringify(data)
+  analyze: (data: {
+    content: string;
+    productLine?: string;
+    rating?: number;
+    language?: string;
+  }) =>
+    request<AnalysisResult>("/feedbacks/analyze", {
+      method: "POST",
+      body: JSON.stringify(data),
     }),
 
   /** 导入外部反馈数据（Java 端仅返回 created） */
-  import: (content: string, format: 'json' | 'csv') =>
-    request<{ total?: number; created: number }>('/feedbacks/import', {
-      method: 'POST',
-      body: JSON.stringify({ content, format })
+  import: (content: string, format: "json" | "csv") =>
+    request<{ total?: number; created: number }>("/feedbacks/import", {
+      method: "POST",
+      body: JSON.stringify({ content, format }),
     }),
 
   /** 生成演示数据 */
   generateDemo: (count: number) =>
-    request<{ created: number }>('/feedbacks/generate-demo', {
-      method: 'POST',
-      body: JSON.stringify({ count })
+    request<{ created: number }>("/feedbacks/generate-demo", {
+      method: "POST",
+      body: JSON.stringify({ count }),
     }),
 
   /** 人工复核 */
-  review: (id: string, data: { sentiment?: string; topics?: string[]; urgency?: string }) =>
+  review: (
+    id: string,
+    data: { sentiment?: string; topics?: string[]; urgency?: string },
+  ) =>
     request<Feedback>(`/feedbacks/${id}/review`, {
-      method: 'PATCH',
-      body: JSON.stringify(data)
+      method: "PATCH",
+      body: JSON.stringify(data),
     }),
 
   /** 评分归因报告 */
   getInsight: (productLine?: string) =>
-    request<InsightReport>(`/feedbacks/insight${productLine ? `?productLine=${productLine}` : ''}`),
+    request<InsightReport>(
+      `/feedbacks/insight${productLine ? `?productLine=${productLine}` : ""}`,
+    ),
 
-  delete: (id: string) => request<void>(`/feedbacks/${id}`, { method: 'DELETE' })
+  delete: (id: string) =>
+    request<void>(`/feedbacks/${id}`, { method: "DELETE" }),
 };
 
 // ============ 预警 ============
 export const alertsApi = {
-  getAll: async (params?: { page?: number; limit?: number; unreadOnly?: boolean; unhandledOnly?: boolean }) => {
+  getAll: async (params?: {
+    page?: number;
+    limit?: number;
+    unreadOnly?: boolean;
+    unhandledOnly?: boolean;
+  }) => {
     const searchParams = new URLSearchParams();
     if (params) {
       Object.entries(params).forEach(([key, value]) => {
@@ -280,29 +325,57 @@ export const alertsApi = {
     if (isJavaPage(res.pagination)) {
       return { ...res, pagination: toPagination(res.pagination) };
     }
-    return res as { data: Alert[]; unreadCount: number; unhandledCount: number; pagination: Pagination };
+    return res as {
+      data: Alert[];
+      unreadCount: number;
+      unhandledCount: number;
+      pagination: Pagination;
+    };
   },
 
-  markAsRead: (id: string) => request<Alert>(`/alerts/${id}/read`, { method: 'PATCH' }),
+  markAsRead: (id: string) =>
+    request<Alert>(`/alerts/${id}/read`, { method: "PATCH" }),
 
-  markAllAsRead: () => request<void>('/alerts/read-all', { method: 'PATCH' }),
+  markAllAsRead: () => request<void>("/alerts/read-all", { method: "PATCH" }),
 
-  handle: (id: string) => request<Alert>(`/alerts/${id}/handle`, { method: 'PATCH' }),
+  handle: (id: string) =>
+    request<Alert>(`/alerts/${id}/handle`, { method: "PATCH" }),
 
-  delete: (id: string) => request<void>(`/alerts/${id}`, { method: 'DELETE' })
+  delete: (id: string) => request<void>(`/alerts/${id}`, { method: "DELETE" }),
 };
 
 // ============ 设置 ============
 export const settingsApi = {
-  getAll: () => request<Record<string, string>>('/settings'),
+  getAll: () => request<Record<string, string>>("/settings"),
 
   update: (settings: Record<string, string>) =>
-    request<void>('/settings', {
-      method: 'PUT',
-      body: JSON.stringify(settings)
-    })
+    request<void>("/settings", {
+      method: "PUT",
+      body: JSON.stringify(settings),
+    }),
 };
 
 // 手动触发一轮分析（异步：投递到 MQ，消费者并发执行，结果经实时推送到达）
 export const triggerInsightCheck = () =>
-  request<{ message: string; queued?: number }>('/check-feedbacks', { method: 'POST' });
+  request<{ message: string; queued?: number }>("/check-feedbacks", {
+    method: "POST",
+  });
+
+// ============ 认证 ============
+export interface LoginResult {
+  token: string;
+  username: string;
+  role: string;
+}
+
+export const authApi = {
+  /** 登录，返回 JWT 与角色 */
+  login: (username: string, password: string) =>
+    request<LoginResult>("/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ username, password }),
+    }),
+
+  /** 当前用户信息 */
+  me: () => request<{ username: string; role: string }>("/auth/me"),
+};

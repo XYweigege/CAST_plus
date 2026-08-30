@@ -9,13 +9,33 @@ import {
   type AnalysisResult, type InsightReport, type FeedbackQuery
 } from './services/api';
 import { onNewFeedback, onAlert, subscribeToTopics } from './services/socket';
+import { isLoggedIn } from './services/auth';
 import { cn } from './lib/utils';
 import Layout, { type TabKey } from './components/Layout';
+import LoginPage from './components/LoginPage';
 import FeedbackTable from './components/FeedbackTable';
 import FilterSortBar, { defaultFilterState, type FilterState } from './components/FilterSortBar';
 import { PRODUCT_LINES } from './constants';
 
+/**
+ * 路由守卫：未登录显示登录页；监听 401 触发的 auth:logout 事件自动退出。
+ */
 function App() {
+  const [authed, setAuthed] = useState(isLoggedIn());
+
+  useEffect(() => {
+    const onLogout = () => setAuthed(false);
+    window.addEventListener('auth:logout', onLogout);
+    return () => window.removeEventListener('auth:logout', onLogout);
+  }, []);
+
+  if (!authed) {
+    return <LoginPage onSuccess={() => setAuthed(true)} />;
+  }
+  return <MainApp />;
+}
+
+function MainApp() {
   const [activeTab, setActiveTab] = useState<TabKey>('feedbacks');
 
   const [topics, setTopics] = useState<Topic[]>([]);

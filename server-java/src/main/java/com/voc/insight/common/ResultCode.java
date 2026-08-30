@@ -11,6 +11,8 @@ public enum ResultCode {
 
     SUCCESS(0, "成功"),
     PARAM_ERROR(400, "参数错误"),
+    UNAUTHORIZED(401, "未认证或登录已过期"),
+    FORBIDDEN(403, "无权限执行该操作"),
     NOT_FOUND(404, "资源不存在"),
     CONFLICT(409, "资源冲突"),
     ERROR(500, "系统繁忙，请稍后重试"),
@@ -21,7 +23,8 @@ public enum ResultCode {
     FEEDBACK_NOT_FOUND(1003, "反馈不存在"),
     ALERT_NOT_FOUND(1004, "预警不存在"),
     CONTENT_EMPTY(1005, "反馈内容不能为空"),
-    IMPORT_PARSE_FAIL(1006, "导入数据解析失败，未解析到有效反馈");
+    IMPORT_PARSE_FAIL(1006, "导入数据解析失败，未解析到有效反馈"),
+    LOGIN_FAIL(1007, "用户名或密码错误");
 
     private final Integer code;
     private final String message;
