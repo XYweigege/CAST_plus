@@ -53,13 +53,17 @@ CREATE TABLE IF NOT EXISTS feedback (
     human_label     TEXT                     COMMENT '人工修正结果 JSON',
     is_reviewed     TINYINT(1)    NOT NULL DEFAULT 0 COMMENT '是否已复核',
 
+    -- 归因状态
+    is_analyzed     TINYINT(1)    NOT NULL DEFAULT 0 COMMENT '是否已归因（0=待归因，1=已归因）',
+
     topic_id        VARCHAR(64)              COMMENT '归属主题词 ID',
 
     UNIQUE KEY uk_source_sid (source, source_id),
     KEY idx_feedback_created_at (created_at),
     KEY idx_feedback_urgency (urgency),
     KEY idx_feedback_sentiment (sentiment),
-    KEY idx_feedback_topic_id (topic_id)
+    KEY idx_feedback_topic_id (topic_id),
+    KEY idx_feedback_is_analyzed (is_analyzed)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci COMMENT = '客户反馈';
 
 -- ============================================================
@@ -88,3 +92,8 @@ VALUES
     (UUID(), '销售误导', '合规', 1, 0, 0, 1),
     (UUID(), '客服响应', '服务', 1, 0, 0, 1)
 ON DUPLICATE KEY UPDATE id = id;
+
+-- ============================================================
+-- 存量数据迁移：已有分析结果的反馈标记为已归因
+-- ============================================================
+UPDATE feedback SET is_analyzed = 1 WHERE sentiment != 'neutral' OR urgency != 'info';

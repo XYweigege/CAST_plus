@@ -86,6 +86,11 @@ public class Feedback implements Serializable {
     /** 是否已复核 */
     private Boolean isReviewed;
 
+    // ===== 归因状态 =====
+
+    /** 是否已归因（false=待归因，定时任务扫描投递；true=已归因） */
+    private Boolean isAnalyzed;
+
     // ===== 关联 =====
 
     /** 归属主题词 ID */

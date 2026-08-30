@@ -8,9 +8,9 @@ import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.stereotype.Component;
 
 /**
- * 分析任务消费者。
+ * 归因任务消费者。
  * 并发消费（并发数见 application.yml spring.rabbitmq.listener.simple），
- * 耗时的 AI 调用在这里执行，失败由重试配置兜底（3 次后丢弃并记日志）。
+ * 读库 → 耗时的 AI 归因在这里执行 → 写回同一行，失败由重试配置兜底（3 次后丢弃并记日志）。
  */
 @Slf4j
 @Component
@@ -22,9 +22,9 @@ public class AnalyzeTaskConsumer {
     @RabbitListener(queues = RabbitMQConfig.ANALYZE_QUEUE)
     public void onMessage(AnalyzeTaskMessage message) {
         try {
-            insightService.processAnalyzeTask(message.getTopicId(), message.getFeedback());
+            insightService.processAnalyzeTask(message.getFeedbackId());
         } catch (Exception e) {
-            log.error("分析任务消费失败 (topicId={}): {}", message.getTopicId(), e.getMessage());
+            log.error("归因任务消费失败 (feedbackId={}): {}", message.getFeedbackId(), e.getMessage());
             throw e; // 抛出让容器按重试策略处理
         }
     }

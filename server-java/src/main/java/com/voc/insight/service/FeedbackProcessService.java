@@ -16,13 +16,12 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
-import java.math.BigDecimal;
 import java.util.Map;
 
 /**
  * 反馈处理组件。
- * 统一「保存 → 实时推送 → 预警」三步，供定时任务、文件导入、演示生成三处复用，
- * 避免同样的逻辑在三处各写一遍。
+ * 统一「raw 落库（去重）→ 归因后推送/预警」两步，
+ * 供 CSAT 采集接口、文件导入、演示生成三处复用，避免同样的逻辑各写一遍。
  */
 @Slf4j
 @Service
@@ -40,15 +39,13 @@ public class FeedbackProcessService {
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     /**
-     * 保存一条已分析的反馈，并按紧急度决定是否预警。
+     * 保存一条原始反馈（未归因，is_analyzed=0），等待定时任务扫描归因。
+     * 去重：同一来源的同一条记录只入库一次（Redis 快速路径，DB 唯一约束兜底）。
      *
-     * @param input    原始反馈
-     * @param analysis AI 分析结果
-     * @param topicId  归属主题词（无归属可为 null）
+     * @param input 原始反馈
      * @return 保存后的反馈；重复数据返回 null
      */
-    public Feedback saveFeedback(FeedbackInput input, FeedbackAnalysis analysis, String topicId) {
-        // 去重：同一来源的同一条记录只处理一次（Redis 快速路径，DB 唯一约束兜底）
+    public Feedback ingestRaw(FeedbackInput input) {
         if (isDuplicate(input)) {
             return null;
         }
@@ -64,15 +61,7 @@ public class FeedbackProcessService {
         feedback.setLanguage(input.getLanguage());
         feedback.setAuthorName(input.getAuthorName());
         feedback.setPublishedAt(input.getPublishedAt());
-        feedback.setSentiment(analysis.getSentiment());
-        feedback.setTopics(toJson(analysis));
-        feedback.setUrgency(analysis.getUrgency());
-        feedback.setUrgencyReason(analysis.getUrgencyReason());
-        feedback.setAiSummary(analysis.getAiSummary());
-        feedback.setConfidence(BigDecimal.valueOf(analysis.getConfidence()));
-        // 低置信度判定不写入终态，等待人工复核
-        feedback.setIsReviewed(analysis.getConfidence() >= BusinessDict.CONFIDENCE_THRESHOLD);
-        feedback.setTopicId(topicId);
+        feedback.setIsAnalyzed(false);
 
         try {
             feedbackMapper.insert(feedback);
@@ -81,15 +70,34 @@ public class FeedbackProcessService {
             return null;
         }
 
-        // 实时推送
+        // raw 到达即推送，管理端可实时看到新反馈（归因结果稍后由消费者推送更新）
+        notifyService.push("feedback:new", feedback);
+        return feedback;
+    }
+
+    /**
+     * 归因完成后的后置动作：实时推送 + 按紧急度预警。
+     * 由消费者写回数据库后调用。
+     *
+     * @param feedback 已归因的反馈（含最新分析字段）
+     * @param analysis AI 分析结果
+     */
+    public void afterAnalysis(Feedback feedback, FeedbackAnalysis analysis) {
         notifyService.push("feedback:new", feedback);
 
         // 预警：仅 action / critical 触发，避免告警疲劳
         if (BusinessDict.ALERT_URGENCIES.contains(analysis.getUrgency())) {
             createAlert(feedback, analysis);
         }
+    }
 
-        return feedback;
+    /** 分析结果的主题标签序列化为 JSON 数组字符串 */
+    public String toTopicsJson(FeedbackAnalysis analysis) {
+        try {
+            return objectMapper.writeValueAsString(analysis.getTopics());
+        } catch (Exception e) {
+            return "[]";
+        }
     }
 
     /**
@@ -135,14 +143,6 @@ public class FeedbackProcessService {
 
         mailService.sendAlert(alert.getTitle(), alert.getContent(), alert.getUrgency(),
                 analysis.getTopics(), feedback.getProductLine(), feedback.getRating());
-    }
-
-    private String toJson(FeedbackAnalysis analysis) {
-        try {
-            return objectMapper.writeValueAsString(analysis.getTopics());
-        } catch (Exception e) {
-            return "[]";
-        }
     }
 
     private String truncate(String text, int maxLen) {

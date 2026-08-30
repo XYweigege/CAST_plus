@@ -66,9 +66,12 @@ voc:
     model: ${AI_MODEL:deepseek/deepseek-v3.2}
   notify-email: ${NOTIFY_EMAIL:}
   insight:
-    # Spring @Scheduled cron 为 6 位（含秒）：每 30 分钟执行
-    cron: "0 */30 * * * ?"
-    batch-size: 12
+    # Spring @Scheduled cron 为 6 位（含秒）：日间 09:00 与 14:00 各一轮批量归因
+    cron: "0 0 9,14 * * ?"
+    # 夜间兜底批量：23:30 清零当天漏网与存量未归因数据
+    night-cron: "0 30 23 * * ?"
+    # 单轮扫描投递的待归因反馈上限
+    batch-size: 200
     surge-threshold: 5
     surge-cooldown-hours: 12
     confidence-threshold: 0.7

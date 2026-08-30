@@ -220,13 +220,12 @@ public class FeedbackServiceImpl extends ServiceImpl<FeedbackMapper, Feedback> i
         return analyzeAndSave(items);
     }
 
-    /** 批量分析并保存，单条失败不影响整批 */
+    /** 批量落库为 raw（is_analyzed=0），由定时任务扫描归因；单条失败不影响整批 */
     private int analyzeAndSave(List<FeedbackInput> items) {
         int created = 0;
         for (FeedbackInput item : items) {
             try {
-                FeedbackAnalysis analysis = aiService.analyzeFeedback(item, List.of());
-                if (processService.saveFeedback(item, analysis, null) != null) {
+                if (processService.ingestRaw(item) != null) {
                     created++;
                 }
             } catch (Exception e) {
